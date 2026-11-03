@@ -1,9 +1,8 @@
 """T1 black-box tests: open/reveal/move-to-trash, the delete-confirm dialog,
 the context menu, and the undo toast — all driven headlessly through
-`FileManager.step` (push + dispatch + flush whatever `QuiApp` call the
-handler queued), exactly as a real `--tui`/`--native` session would see it
-if that backend could hand control back between events (see `app.py`'s
-module doc)."""
+`FileManager.step`, which is the push-and-dispatch pair a real `--tui`
+session's pump performs per event, deferred-action drain included (see
+`app.py`'s module doc)."""
 
 from quadraui_files import FileManager
 from quadraui_files.app import (
@@ -98,11 +97,56 @@ def test_context_menu_open_and_reveal_do_not_raise(sample_tree):
 
     fm.step(_key_event(MENU_KEY))
     fm.step(_key_event(ENTER_KEY))  # "Open" is the first/default item
-    # `open_path` has no reachable OS opener in a headless test run; `step`
-    # must swallow that rather than letting it raise out of the handler.
-    assert fm._open_request is None  # queued request was flushed either way
+    # The headless backend has no OS opener, so `open_path` is a no-op there --
+    # what matters is that neither the handler nor the pump's drain raises, and
+    # that the menu closed.
+    assert fm._menu_target is None
+    assert "Reveal" not in fm.app.screen()
 
     fm.step(_key_event(MENU_KEY))
     fm.step(_key_event(DOWN_KEY))  # down to "Reveal"
     fm.step(_key_event(ENTER_KEY))
-    assert fm._reveal_request is None
+    assert fm._menu_target is None
+    assert "Reveal" not in fm.app.screen()
+
+
+def test_actions_land_without_python_driving_the_flush(sample_tree):
+    """The real-backend path. `run_tui` owns the app for its whole run and
+    never gives top-level Python a turn between events, so the whole
+    delete flow has to work with nothing but `QuiApp`'s own push/dispatch pump
+    running -- no `FileManager` code in between. Driven here through
+    `fm.app` directly, deliberately bypassing `FileManager.step`."""
+    fm = FileManager(sample_tree)
+
+    def pump(event: dict) -> None:
+        fm.app.push_event(event)
+        fm.app.step()
+
+    pump(_key_event(ENTER_KEY))  # open the root as a details tab
+    idx = [c.name for c in fm.open[fm.active_tab].children].index("readme.txt")
+    pump({"DataTable": [f"fm:grid:{fm.active_tab}", {"RowActivated": {"idx": idx}}]})
+
+    pump(_key_event(DELETE_KEY))
+    screen = fm.app.screen()
+    assert "Move to Trash" in screen, f"dialog never reached the screen:\n{screen}"
+    assert "Cancel" in screen and "Delete" in screen
+
+    pump(_key_event(ENTER_KEY))  # confirm
+    assert not (sample_tree / "readme.txt").exists(), "file wasn't actually trashed"
+    assert "Moved to Trash" in fm.app.screen()
+
+
+def test_trashing_a_vanished_file_is_reported_not_raised(sample_tree):
+    """The confirm dialog is modal but the filesystem is not: the file can be
+    gone by the time Delete is pressed. Trashing a missing path fails inside
+    the pump, where nothing can catch it, so it must never be queued."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")
+
+    fm.step(_key_event(DELETE_KEY))
+    (sample_tree / "readme.txt").unlink()
+    fm.step(_key_event(ENTER_KEY))  # confirm -- must not raise out of the pump
+
+    assert "readme.txt" not in [c.name for c in fm.open[fm.active_tab].children]
+    assert "no longer there" in fm.app.screen()

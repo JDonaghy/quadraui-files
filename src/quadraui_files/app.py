@@ -44,13 +44,21 @@ Interaction (keyboard drives, mouse works too):
 A right-click would be the natural way to open the context menu, but the
 installed quadraui's `Tree`/`DataTable` row-click events don't report which
 mouse button triggered them, so a right click on a row can't be told apart
-from a left one here -- `Menu` is the keyboard stand-in. `show_message_dialog`/
-`show_context_menu`/`show_toast`, and every other `QuiApp` call this file
-makes for Open/Reveal/Trash, run only from `step()`, never from `_handle`/
-`_render`: `QuiApp` rejects a call made while it's already dispatching to one
-of those two callbacks (the same reentrant-borrow rule as everywhere else in
-this module), so the handler only ever *queues* a request and `step()`
-performs it once `self.app.step()` has returned.
+from a left one here -- `Menu` is the keyboard stand-in.
+
+The overlay surfaces (`show_message_dialog` / `show_context_menu` /
+`show_toast`) and the OS actions (`open_path` / `reveal_in_file_manager` /
+`move_to_trash`) are never called on `QuiApp` itself from `_handle`/`_render`:
+`QuiApp` holds its one mutable borrow for the whole dispatch into either
+callback and rejects a reentrant call. They go through the deferred-action
+handle `QuiApp.actions()` returns instead -- obtained once in `__init__`,
+before any run loop starts, and called straight from the handler, which
+validates the arguments on the spot and queues the action. The event pump
+(`QuiApp.step`, and `run_tui`'s own loop) drains that queue right after the
+dispatch that filled it, so the dialog, menu, toast or OS call lands without
+any Python code needing to run between events. `run_native`'s GTK/AppKit/Win32
+loops do not drain it yet, which leaves these actions inert in `--native` --
+the descriptors are identical, see the README's known limits.
 
     python quadraui-py/examples/file_manager.py [PATH]            # headless demo
     python quadraui-py/examples/file_manager.py [PATH] --tui      # real terminal
@@ -366,9 +374,8 @@ def _event_key(event: dict) -> str | None:
 class FileManager:
     """Holds the lazily-scanned model and the live UI state the `render` and
     handler callbacks share. Build one, then call `run_*` for a real backend or
-    drive it headlessly with `step` (preferred over calling `app.push_event`/
-    `app.step` directly -- `step` also performs whatever `QuiApp` call the
-    handler queued, which plain `app.step()` never does)."""
+    drive it headlessly with `step`, the push-and-dispatch pair the run loops
+    perform per event."""
 
     def __init__(self, root_path: Path, width: int = 100, height: int = 30):
         self.root = build_root(root_path)
@@ -381,19 +388,12 @@ class FileManager:
         self.message = ""               # transient status hint
         self.selected_file: Node | None = None  # last file activated in a details tab
 
-        # Delete/Open/Reveal/context-menu all need a `QuiApp` call the
-        # handler itself can't make (see the module doc's reentrant-borrow
-        # note); `_handle` queues the request here and `step` performs it
-        # once `self.app.step()` has returned.
-        self._delete_target: Node | None = None   # node the open confirm dialog is for
-        self._menu_target: Node | None = None     # node the open context menu is for
-        self._open_request: Path | None = None    # path to `open_path`
-        self._reveal_request: Path | None = None  # path to `reveal_in_file_manager`
-        self._trash_request: Node | None = None   # node to `move_to_trash`
-        self._pending_dialog: dict | None = None  # `show_message_dialog` kwargs
-        self._pending_menu: dict | None = None    # `show_context_menu` kwargs
-        self._pending_toast: dict | None = None   # `show_toast` kwargs
-        self._toast_seq = 0                        # makes each toast's id unique
+        # Which node the currently open confirm dialog / context menu is for,
+        # so the `MessageDialogResolved` / `ContextMenuItemActivated` event that
+        # closes it knows what to act on.
+        self._delete_target: Node | None = None
+        self._menu_target: Node | None = None
+        self._toast_seq = 0  # makes each toast's id unique
         # `_tree_capacity` needs these, but `_render` -- which calls it --
         # cannot query them live: `QuiApp`'s constructor below renders frame
         # 0 synchronously, before `self.app` itself exists to query, and
@@ -405,6 +405,10 @@ class FileManager:
         self._chrome_line_height = 1.0
         self._viewport_height = float(height)
         self.app = QuiApp(width, height, render=self._render)
+        # Obtained here, from top-level code: `actions()` is the only way the
+        # handler can reach an overlay/OS call, and it is unreachable once a
+        # run loop owns the app. See the module doc.
+        self.actions = self.app.actions()
         self.app.set_handler(self._handle)
         self._line_height = self.app.line_height()
         self._chrome_line_height = self.app.chrome_line_height()
@@ -549,15 +553,30 @@ class FileManager:
             self._open(child)
         else:
             self.selected_file = child
-            self._open_request = child.path
             self.message = f"opening {child.name} ({_human_size(child.size_bytes)})"
+            self._open_with_os(child)
 
     # --- file actions: delete/trash, open, reveal, context menu -------------
     #
-    # Everything here only *queues* a request (plain attribute writes) --
-    # `_handle` can't call back into `QuiApp`. `step` performs the queued
-    # `QuiApp` call (if any) once `self.app.step()` returns; see the module
-    # doc's reentrant-borrow note.
+    # Every overlay/OS call below goes through `self.actions`, the deferred
+    # handle, so these are safe to reach from `_handle`; see the module doc.
+    # Paths are checked for existence first: the queue applies an action after
+    # the handler returns, and a `move_to_trash` of a vanished path fails
+    # inside the event pump, where this app has no way to catch it.
+
+    def _open_with_os(self, node: Node) -> None:
+        """Hand `node` to the OS's default application for it."""
+        if not node.path.exists():
+            self.message = f"{node.name} is no longer there"
+            return
+        self.actions.open_path(str(node.path))
+
+    def _reveal_in_os(self, node: Node) -> None:
+        """Show `node` in the desktop's own file manager."""
+        if not node.path.exists():
+            self.message = f"{node.name} is no longer there"
+            return
+        self.actions.reveal_in_file_manager(str(node.path))
 
     def _delete_candidate(self) -> Node:
         """What a bare Delete keystroke (or the `Menu` key) acts on: the last
@@ -568,84 +587,85 @@ class FileManager:
         return self.cursor
 
     def _request_delete(self, node: Node) -> None:
-        """Queue a Cancel/Delete confirm dialog for `node`."""
+        """Put up a Cancel/Delete confirm dialog for `node`."""
         if node is self.root:
             self.message = "can't trash the browser's root"
             return
         self._delete_target = node
         kind = "folder" if node.is_dir else "file"
-        self._pending_dialog = {
-            "title": "Move to Trash",
-            "body": f'Move "{node.name}" ({kind}) to the Trash?',
-            "buttons": [
+        self.actions.show_message_dialog(
+            title="Move to Trash",
+            body=f'Move "{node.name}" ({kind}) to the Trash?',
+            buttons=[
                 {"id": "cancel", "label": "Cancel", "is_cancel": True},
                 {"id": "delete", "label": "Delete", "is_default": True},
             ],
-            "severity": "warning",
-        }
+            severity="warning",
+        )
 
     def _on_dialog_resolved(self, button_id: str) -> None:
-        """The confirm dialog closed with `button_id`: queue the actual trash
-        on "delete", drop the pending target either way."""
+        """The confirm dialog closed with `button_id`: trash on "delete", drop
+        the pending target either way."""
         target = self._delete_target
         self._delete_target = None
         if button_id == "delete" and target is not None:
-            self._trash_request = target
+            self._trash(target)
 
     def _request_context_menu(self, node: Node) -> None:
-        """Queue a context menu (Open / Reveal in file manager / Move to
+        """Put up a context menu (Open / Reveal in file manager / Move to
         Trash) for `node`."""
         self._menu_target = node
-        self._pending_menu = {
-            "items": [
+        self.actions.show_context_menu(
+            items=[
                 {"id": "open", "label": _styled_text("Open")},
                 {"id": "reveal", "label": _styled_text("Reveal")},
                 {"id": "trash", "label": _styled_text("Move to Trash")},
             ],
-            "position": (2, 2),
-        }
+            position=(2, 2),
+        )
 
     def _on_menu_item(self, item_id: str) -> None:
-        """A context-menu item was chosen: queue the matching action for
+        """A context-menu item was chosen: run the matching action on
         `self._menu_target` (set when the menu was requested)."""
         node = self._menu_target
         self._menu_target = None
         if node is None:
             return
         if item_id == "open":
-            self._open_request = node.path
+            self._open_with_os(node)
         elif item_id == "reveal":
-            self._reveal_request = node.path
+            self._reveal_in_os(node)
         elif item_id == "trash":
             self._request_delete(node)
 
     def _on_toast_action(self, action_id: str) -> None:
-        """An action button on a toast was clicked. `undo` is a stub -- see
-        the module doc/issue notes on why restoring from the trash isn't
-        wired up this tranche."""
+        """An action button on a toast was clicked. `undo` is an affordance
+        only: nothing in quadraui can restore a path out of the OS trash, so
+        it reports that instead of pretending to."""
         if action_id == "undo":
             self.message = "undo isn't wired up yet"
 
     def _trash(self, node: Node) -> None:
-        """Actually move `node` to the trash (a real `QuiApp` call -- only
-        reached from `step`, never from `_handle`): drop it from the model
-        and any open tab, and queue an undo-affordance toast."""
-        try:
-            self.app.move_to_trash(str(node.path))
-        except Exception:
-            self.message = f"couldn't trash {node.name}"
+        """Move `node` to the trash, drop it from the model and any open tab,
+        and put up an undo-affordance toast."""
+        if not node.path.exists():
+            self.message = f"{node.name} is no longer there"
+            self._forget(node)
             return
+        self.actions.move_to_trash(str(node.path))
+        # Optimistic: the trash itself runs when the pump drains the queue, so
+        # the model is updated now and the toast queued behind the removal.
         self._forget(node)
         self.message = ""
         self._toast_seq += 1
-        self._pending_toast = {
-            "toast": {
+        self.actions.show_toast(
+            toast={
                 "id": f"fm:toast:{self._toast_seq}",
                 "title": "Moved to Trash — Undo",
                 "body": node.name,
                 "actions": [{"id": "undo", "label": "Undo", "style": "Default"}],
             },
-        }
+        )
 
     def _forget(self, node: Node) -> None:
         """Drop `node` from the model after it's been trashed: remove it from
@@ -662,50 +682,14 @@ class FileManager:
         if self.selected_file is node:
             self.selected_file = None
 
-    def _flush_pending(self) -> None:
-        """Every `QuiApp` call `_handle` queued instead of making itself,
-        performed here once `self.app.step()` has returned -- see `step` and
-        the module doc's reentrant-borrow note. Called by `step` only, never
-        from inside `_handle`/`_render`."""
-        if self._open_request is not None:
-            path, self._open_request = self._open_request, None
-            try:
-                self.app.open_path(str(path))
-            except Exception:
-                self.message = f"couldn't open {path.name}"
-
-        if self._reveal_request is not None:
-            path, self._reveal_request = self._reveal_request, None
-            try:
-                self.app.reveal_in_file_manager(str(path))
-            except Exception:
-                self.message = f"couldn't reveal {path.name}"
-
-        if self._trash_request is not None:
-            node, self._trash_request = self._trash_request, None
-            self._trash(node)
-
-        if self._pending_dialog is not None:
-            dialog, self._pending_dialog = self._pending_dialog, None
-            self.app.show_message_dialog(**dialog)
-
-        if self._pending_menu is not None:
-            menu, self._pending_menu = self._pending_menu, None
-            self.app.show_context_menu(**menu)
-
-        if self._pending_toast is not None:
-            toast, self._pending_toast = self._pending_toast, None
-            self.app.show_toast(**toast)
-
     def step(self, event: dict) -> None:
-        """Push `event`, dispatch it, then perform whatever `QuiApp` call
-        `_handle` queued (open/reveal/trash, a confirm dialog, a context
-        menu, or a toast) -- the preferred way to drive this app from Python,
-        in tests or the headless demo below, over calling `app.push_event`/
-        `app.step` directly."""
+        """Push `event` and dispatch it. `QuiApp.step` also drains the
+        deferred-action queue the handler may have filled (a confirm dialog, a
+        context menu, a toast, an open/reveal/trash), exactly as `run_tui`'s
+        own pump does, so one call leaves the app in the state a real session
+        would show."""
         self.app.push_event(event)
         self.app.step()
-        self._flush_pending()
 
     # --- render + handle -----------------------------------------------------
 

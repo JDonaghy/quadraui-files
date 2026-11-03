@@ -51,7 +51,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | Tranche | Scope | State |
 |---|---|---|
 | **T0** | Folder tree + file-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
-| **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ on the Python-driven path ([known limits](#known-limits)) |
+| **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ headless + `--tui` ([known limits](#known-limits)) |
 | **T2** | Filter/search box, F2 rename, column sort | planned |
 | **Preview** | Read-only preview pane for the selected file | planned |
 | **T3** | OS-theme match, keybindings, tooltips, notifications | planned |
@@ -69,19 +69,19 @@ behavior (the window/tray and native file ops) is verified manually.
 `QuiApp` holds its one mutable borrow for the whole dispatch of an event, so a handler
 or render callback cannot call back into it — the overlay surfaces
 (`show_message_dialog` / `show_context_menu` / `show_toast`) and the OS actions
-(`open_path` / `reveal_in_file_manager` / `move_to_trash`) have to be invoked from
-top-level script code instead. The file actions therefore *queue* a request in the
-handler and `FileManager.step` performs it right after `app.step()` returns.
+(`open_path` / `reveal_in_file_manager` / `move_to_trash`) are reached through the
+deferred-action handle `QuiApp.actions()` returns instead. `FileManager` obtains that
+handle once in `__init__` and the handler calls it directly; the event pump drains the
+queue right after the dispatch that filled it.
 
-`run_tui()` / `run_native()` block for their entire run and never hand control back to
-top-level Python between events (a tick handler is dispatched the same way a handler is,
-and hits the same borrow wall), so in a real terminal/native session the queued dialog,
-menu, toast and OS call never fire. T1's actions are exercised end to end through the
-headless-driven path (the tests, `--dump`, the default headless run); giving them a
-real-backend home needs a deferred-action hook in quadraui-py itself.
+`run_tui()` drains that queue, so **T1's actions work in a real terminal**.
+`run_native()`'s GTK/AppKit/Win32 loops do not drain it yet: an action queued while a
+native window is open sits there until the window closes. So in `--native`, the context
+menu, confirm dialog, toast and OS calls do not appear — that is a quadraui-py gap, not
+a descriptor difference, and the same Python drives both backends unchanged.
 
-The toast's **Undo** button is an affordance only — restoring a file out of the OS trash
-is not implemented.
+The toast's **Undo** button is an affordance only — nothing in quadraui can restore a
+path out of the OS trash, so clicking it reports that rather than pretending to.
 
 ## quadraui dependency
 
