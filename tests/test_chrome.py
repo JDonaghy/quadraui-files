@@ -1,19 +1,14 @@
-"""T3 black-box tests: OS-theme match and the global keybindings -- driven
-headlessly through `FileManager.step`, same as the other suites (see
-`app.py`'s module doc).
-
-Tooltips (hover a tree/details row) and notifications (`QuiApp.send_notification`
-on a completed op) are not covered here: both would need `_handle` to call a
-method `QuiApp.actions()` doesn't carry (`show_tooltip`/`send_notification`),
-and every other `QuiApp` method raises "already borrowed" when called from
-inside the handler's dispatch -- see `app.py`'s own doc for the `actions()`
-handle and `ACCELERATORS`'s doc for the same reentrancy constraint applied to
-`register_accelerator`. There is no reachable way to wire either from this
-app without quadraui-py's deferred-action queue growing to cover them.
+"""T3b black-box tests: OS-theme match, the global keybindings, hover
+tooltips, notifications, and the overlay guard -- driven headlessly through
+`FileManager.step`, same as the other suites (see `app.py`'s module doc).
 """
 
+from conftest import activate_child as _activate_child
+
+from quadraui import InvalidDescriptorError
+
 from quadraui_files import FileManager
-from quadraui_files.app import DOWN_KEY, ENTER_KEY, _key_event
+from quadraui_files.app import DELETE_KEY, DOWN_KEY, ENTER_KEY, QuiApp, _key_event
 
 F2_KEY = {"Named": {"F": 2}}
 CTRL_F_EVENT = {
@@ -23,6 +18,10 @@ CTRL_F_EVENT = {
         "repeat": False,
     }
 }
+
+
+def _open_root_tab(fm: FileManager) -> None:
+    fm.step(_key_event(ENTER_KEY))
 
 
 # --- OS theme match -----------------------------------------------------
@@ -60,6 +59,25 @@ def test_unsupported_system_theme_falls_back_to_the_backend_default(sample_tree,
     )
 
 
+def test_light_theme_status_bar_colors_differ_from_dark(sample_tree, monkeypatch):
+    """The status bar isn't painted from `set_theme`'s palette (it needs its
+    own explicit fg/bg) -- `_apply_system_theme` must still pick a light
+    pair for it under a light OS theme, not leave it on the dark triple
+    regardless. Checked on the painted bottom-left status cell, same
+    `cell_colors` proof-of-paint `test_dark_system_theme_...` uses above."""
+    monkeypatch.setenv("COLORFGBG", "15;0")  # system is dark
+    dark = FileManager(sample_tree, width=60, height=20)
+    _fg_dark, bg_dark = dark.app.cell_colors(0, 19)
+
+    monkeypatch.setenv("COLORFGBG", "0;15")  # system is light
+    light = FileManager(sample_tree, width=60, height=20)
+    _fg_light, bg_light = light.app.cell_colors(0, 19)
+
+    assert bg_dark != bg_light, f"status bar background didn't change: {bg_dark}"
+    assert light._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
+    assert dark._status_bg == {"r": 30, "g": 32, "b": 48, "a": 255}
+
+
 # --- keybindings (C15) ---------------------------------------------------
 
 
@@ -81,16 +99,118 @@ def test_f2_accelerator_opens_the_rename_box_for_the_cursored_folder(sample_tree
 
 def test_registered_accelerators_are_ignored_while_the_edit_box_is_open(sample_tree):
     """An accelerator firing mid-edit must not reroute the box onto a
-    different target -- same suppression the equivalent plain key already
-    gets from `_handle_edit_key` (see `ACCELERATORS`'s own doc)."""
+    different target, and must not leak its own key into the buffer either
+    -- same suppression the equivalent plain key already gets from
+    `_handle_edit_key` (see `ACCELERATORS`'s own doc)."""
     fm = FileManager(sample_tree)
     fm.step(_key_event(ENTER_KEY))  # open the root folder as a details tab
     fm.step(_key_event(DOWN_KEY))
     fm.step(_key_event(F2_KEY))  # start renaming the cursored node
     renaming = fm.rename_target
+    text_before = fm.edit_text
     assert fm.edit_mode == "rename"
 
     fm.step(CTRL_F_EVENT)  # must not switch the box into "filter" mid-rename
 
     assert fm.edit_mode == "rename"
     assert fm.rename_target is renaming
+    assert fm.edit_text == text_before, "the ctrl+f chord must not have landed as a typed 'f'"
+    assert "f" not in fm.filter_text
+
+
+def test_typing_a_bare_f_into_the_open_filter_box_is_not_swallowed(sample_tree):
+    """Only the *chord* `ctrl+f`/`cmd+f` is a registered global accelerator
+    (see `ACCELERATORS`'s own doc) -- a bare `f` keystroke must still reach
+    the filter box as ordinary typed text once it's open."""
+    fm = FileManager(sample_tree)
+    fm.step(CTRL_F_EVENT)  # open the filter box
+    assert fm.edit_mode == "filter"
+
+    fm.step(_key_event({"Char": "f"}))
+
+    assert fm.filter_text == "f"
+    assert fm.edit_text == "f"
+
+
+def test_accelerator_registration_rejecting_one_chord_does_not_raise(sample_tree, monkeypatch):
+    """A backend that rejects a chord it doesn't recognize (`cmd+f` off
+    macOS, say) must not take `FileManager.__init__` down with it, and must
+    not stop the rest of the list from registering either."""
+    original = QuiApp.register_accelerator
+
+    def flaky(self, descriptor):
+        if descriptor["id"] == "fm:accel:search_cmd":
+            raise InvalidDescriptorError("this backend doesn't know this chord")
+        return original(self, descriptor)
+
+    monkeypatch.setattr(QuiApp, "register_accelerator", flaky)
+
+    fm = FileManager(sample_tree)  # must not raise
+
+    # The other accelerators registered fine despite the one rejection.
+    fm.step(CTRL_F_EVENT)
+    assert fm.edit_mode == "filter"
+
+
+# --- overlay guard --------------------------------------------------------
+
+
+def test_delete_and_f2_accelerators_are_dropped_while_the_confirm_dialog_is_open(sample_tree):
+    """Pressing `Delete` again while the trash-confirm dialog is already up
+    must not overwrite `_delete_target` and queue a second dialog; `F2`
+    must not open a rename box behind it either."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")
+
+    fm.step(_key_event(DELETE_KEY))
+    target = fm._delete_target
+    assert target is not None and target.name == "readme.txt"
+
+    fm.step(_key_event(DELETE_KEY))  # re-entry attempt
+    assert fm._delete_target is target, "a second Delete must not touch the pending target"
+
+    fm.step(_key_event(F2_KEY))  # would open a rename box behind the dialog
+    assert fm.edit_mode is None, "F2 must not open a rename box while the dialog is open"
+    assert fm.rename_target is None
+
+    screen = fm.app.screen()
+    assert "Move to Trash" in screen and "readme.txt" in screen
+
+
+# --- hover tooltips --------------------------------------------------------
+
+
+def test_hovering_a_tree_row_shows_a_tooltip_with_its_full_path(sample_tree):
+    fm = FileManager(sample_tree)
+    fm.step(_key_event(DOWN_KEY))  # cursor onto "alpha" -- the "hover"
+    assert fm.cursor.name == "alpha"
+    assert str(fm.cursor.path) in fm.app.screen()
+
+
+def test_hovering_a_details_row_shows_a_tooltip_with_path_size_and_modified_time(sample_tree):
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")  # the "hover": last file activated
+
+    screen = fm.app.screen()
+    node = fm.selected_file
+    assert node is not None and node.name == "readme.txt"
+    assert str(node.path) in screen
+    assert "B" in screen  # the human-readable size ("5 B")
+
+
+# --- notifications ---------------------------------------------------------
+
+
+def test_completed_trash_sends_a_notification_without_raising(sample_tree):
+    """Fire-and-forget (see `send_notification`'s own doc): there's nothing
+    to assert on besides "the whole delete flow still completes"."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")
+
+    fm.step(_key_event(DELETE_KEY))
+    fm.step(_key_event(ENTER_KEY))  # confirm the default "Delete" button
+
+    assert not (sample_tree / "readme.txt").exists()
