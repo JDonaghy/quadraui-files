@@ -32,7 +32,8 @@ Interaction (keyboard drives, mouse works too):
   Enter / o    open the cursored folder as a details tab (and expand it)
   r            reload the cursored folder from disk
   Delete       trash the selected file (or the cursored folder) -- after a
-               Cancel/Delete confirm dialog -- and show an undo toast
+               Cancel/Delete confirm dialog -- and show a toast whose Undo
+               button puts the trashed path back
   Menu         open a context menu (Open / Reveal in file manager / Move to
                Trash) for the selected file or the cursored folder
   click a tree row         select it and toggle its expansion
@@ -48,17 +49,16 @@ from a left one here -- `Menu` is the keyboard stand-in.
 
 The overlay surfaces (`show_message_dialog` / `show_context_menu` /
 `show_toast`) and the OS actions (`open_path` / `reveal_in_file_manager` /
-`move_to_trash`) are never called on `QuiApp` itself from `_handle`/`_render`:
-`QuiApp` holds its one mutable borrow for the whole dispatch into either
-callback and rejects a reentrant call. They go through the deferred-action
-handle `QuiApp.actions()` returns instead -- obtained once in `__init__`,
-before any run loop starts, and called straight from the handler, which
-validates the arguments on the spot and queues the action. The event pump
-(`QuiApp.step`, and `run_tui`'s own loop) drains that queue right after the
-dispatch that filled it, so the dialog, menu, toast or OS call lands without
-any Python code needing to run between events. `run_native`'s GTK/AppKit/Win32
-loops do not drain it yet, which leaves these actions inert in `--native` --
-the descriptors are identical, see the README's known limits.
+`move_to_trash` / `restore_from_trash`) are never called on `QuiApp` itself
+from `_handle`/`_render`: `QuiApp` holds its one mutable borrow for the whole
+dispatch into either callback and rejects a reentrant call. They go through the
+deferred-action handle `QuiApp.actions()` returns instead -- obtained once in
+`__init__`, before any run loop starts, and called straight from the handler,
+which validates the arguments on the spot and queues the action. Every event
+pump -- `QuiApp.step`, `run_tui`'s loop, and `run_native`'s GTK/AppKit/Win32
+loops -- drains that queue right after the dispatch that filled it, so the
+dialog, menu, toast or OS call lands on every backend without any Python code
+needing to run between events.
 
     python quadraui-py/examples/file_manager.py [PATH]            # headless demo
     python quadraui-py/examples/file_manager.py [PATH] --tui      # real terminal
@@ -73,6 +73,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from quadraui import QuiApp
+
+# Can a trashed path be put back? `restore_from_trash` is implemented for the
+# freedesktop.org trash spec (Linux/BSD) and the Windows recycle bin, and
+# raises on macOS, which exposes no programmatic trash listing to delegate to.
+# This is a *host* capability, not a backend one -- the same value holds for
+# TUI, GTK, AppKit and Win32 on a given machine -- so gating the undo
+# affordance on it keeps one descriptor set running on every backend.
+UNDO_SUPPORTED = sys.platform != "darwin"
 
 
 @dataclass
@@ -393,6 +401,10 @@ class FileManager:
         # closes it knows what to act on.
         self._delete_target: Node | None = None
         self._menu_target: Node | None = None
+        # The one trashed node an `Undo` click may put back, consumed on use:
+        # a second restore of the same path has nothing left to find and fails
+        # inside the event pump, where this app cannot catch it.
+        self._undo_target: Node | None = None
         self._toast_seq = 0  # makes each toast's id unique
         # `_tree_capacity` needs these, but `_render` -- which calls it --
         # cannot query them live: `QuiApp`'s constructor below renders frame
@@ -639,15 +651,24 @@ class FileManager:
             self._request_delete(node)
 
     def _on_toast_action(self, action_id: str) -> None:
-        """An action button on a toast was clicked. `undo` is an affordance
-        only: nothing in quadraui can restore a path out of the OS trash, so
-        it reports that instead of pretending to."""
-        if action_id == "undo":
-            self.message = "undo isn't wired up yet"
+        """An action button on a toast was clicked: `undo` puts the last
+        trashed path back where it came from."""
+        if action_id != "undo":
+            return
+        node = self._undo_target
+        self._undo_target = None
+        if node is None:
+            self.message = "nothing left to undo"
+            return
+        self.actions.restore_from_trash(str(node.path))
+        # Optimistic, exactly as `_trash` is: the restore itself runs when the
+        # pump drains the queue, after this handler returns.
+        self._remember(node)
+        self.message = f"restored {node.name}"
 
     def _trash(self, node: Node) -> None:
         """Move `node` to the trash, drop it from the model and any open tab,
-        and put up an undo-affordance toast."""
+        and put up an undo toast."""
         if not node.path.exists():
             self.message = f"{node.name} is no longer there"
             self._forget(node)
@@ -657,15 +678,16 @@ class FileManager:
         # the model is updated now and the toast queued behind the removal.
         self._forget(node)
         self.message = ""
+        self._undo_target = node if UNDO_SUPPORTED else None
         self._toast_seq += 1
-        self.actions.show_toast(
-            toast={
-                "id": f"fm:toast:{self._toast_seq}",
-                "title": "Moved to Trash — Undo",
-                "body": node.name,
-                "actions": [{"id": "undo", "label": "Undo", "style": "Default"}],
-            },
-        )
+        toast: dict = {
+            "id": f"fm:toast:{self._toast_seq}",
+            "title": "Moved to Trash — Undo" if UNDO_SUPPORTED else "Moved to Trash",
+            "body": node.name,
+        }
+        if UNDO_SUPPORTED:
+            toast["actions"] = [{"id": "undo", "label": "Undo", "style": "Default"}]
+        self.actions.show_toast(toast=toast)
 
     def _forget(self, node: Node) -> None:
         """Drop `node` from the model after it's been trashed: remove it from
@@ -681,6 +703,17 @@ class FileManager:
             self.cursor = parent or self.root
         if self.selected_file is node:
             self.selected_file = None
+
+    def _remember(self, node: Node) -> None:
+        """Put `node` back into the model after a restore, in display order.
+        The inverse of `_forget`, minus the tab/cursor state that restoring a
+        path says nothing about: an undone delete re-lists the entry, it does
+        not reopen the tab it closed."""
+        parent = node.parent
+        if parent is None or parent.children is None:
+            return
+        if node not in parent.children:
+            parent.children = sorted([*parent.children, node], key=_sort_key)
 
     def step(self, event: dict) -> None:
         """Push `event` and dispatch it. `QuiApp.step` also drains the
@@ -930,14 +963,11 @@ def _wrap_quit(fm: FileManager) -> None:
     dispatching events straight to this handler with no point in between
     where top-level script code -- the only place free to call `QuiApp`,
     per the module doc's reentrant-borrow note -- ever gets control back.
-    `FileManager.step` is what makes that top-level call (after pushing and
-    stepping one event), so on these real backends Delete/Menu/opening a
-    file still *queue* their request (plain attribute writes on
-    `FileManager`), but nothing ever calls `step` to flush it, so the
-    confirm dialog/context menu/toast/OS call never actually appears.
-    Headless driving (`--dump`, the tests, `_run_headless` below) is where
-    this tranche's file actions are exercised end to end; manually verify
-    the OS-level Open/Reveal/Trash effects on a real backend separately."""
+    The file actions do not need such a point: they are queued on the
+    deferred-action handle and drained by those loops' own pumps, so the
+    confirm dialog, context menu, toast and OS calls appear on a real
+    backend exactly as they do headlessly. Only the quit keystroke needs
+    this wrapper, since a terminal has no close event to unwind on."""
     inner = fm._handle
 
     def handler(event) -> None:

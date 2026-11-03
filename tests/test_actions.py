@@ -136,6 +136,62 @@ def test_actions_land_without_python_driving_the_flush(sample_tree):
     assert "Moved to Trash" in fm.app.screen()
 
 
+def _click_toast_undo(fm: FileManager) -> None:
+    """Click the undo toast's `Undo` action button."""
+    fm.step({"ToastActionClicked": "undo"})
+
+
+def test_undo_toast_restores_the_trashed_file(sample_tree):
+    """The toast's Undo really puts the path back -- on disk and in the
+    listing -- not just a message saying it would."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")
+
+    fm.step(_key_event(DELETE_KEY))
+    fm.step(_key_event(ENTER_KEY))  # confirm
+    assert not (sample_tree / "readme.txt").exists()
+    assert "Undo" in fm.app.screen()
+
+    _click_toast_undo(fm)
+
+    assert (sample_tree / "readme.txt").exists(), "Undo didn't restore the file"
+    assert (sample_tree / "readme.txt").read_text() == "hello"
+    listing = [c.name for c in fm.open[fm.active_tab].children]
+    assert "readme.txt" in listing, f"restored file missing from the listing: {listing}"
+    assert "restored readme.txt" in fm.app.screen()
+
+
+def test_undo_restores_a_trashed_folder_with_its_contents(sample_tree):
+    fm = FileManager(sample_tree)
+    fm.step(_key_event(DOWN_KEY))  # cursor onto alpha
+    fm.step(_key_event(DELETE_KEY))
+    fm.step(_key_event(ENTER_KEY))  # confirm
+    assert not (sample_tree / "alpha").exists()
+
+    _click_toast_undo(fm)
+
+    assert (sample_tree / "alpha" / "notes.txt").read_text() == "notes"
+    assert "alpha" in fm.app.screen(), "restored folder missing from the tree"
+
+
+def test_a_second_undo_click_is_refused_rather_than_failing_in_the_pump(sample_tree):
+    """A restore of an already-restored path finds nothing in the trash and
+    raises inside the event pump, where this app has no way to catch it -- so
+    the undo token is one-shot and a repeat click must never queue one."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")
+    fm.step(_key_event(DELETE_KEY))
+    fm.step(_key_event(ENTER_KEY))
+
+    _click_toast_undo(fm)
+    _click_toast_undo(fm)  # must not raise out of the pump
+
+    assert (sample_tree / "readme.txt").exists()
+    assert "nothing left to undo" in fm.app.screen()
+
+
 def test_trashing_a_vanished_file_is_reported_not_raised(sample_tree):
     """The confirm dialog is modal but the filesystem is not: the file can be
     gone by the time Delete is pressed. Trashing a missing path fails inside

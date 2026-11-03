@@ -51,7 +51,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | Tranche | Scope | State |
 |---|---|---|
 | **T0** | Folder tree + file-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
-| **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ headless + `--tui` ([known limits](#known-limits)) |
+| **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ all backends ([known limits](#known-limits)) |
 | **T2** | Filter/search box, F2 rename, column sort | planned |
 | **Preview** | Read-only preview pane for the selected file | planned |
 | **T3** | OS-theme match, keybindings, tooltips, notifications | planned |
@@ -69,19 +69,23 @@ behavior (the window/tray and native file ops) is verified manually.
 `QuiApp` holds its one mutable borrow for the whole dispatch of an event, so a handler
 or render callback cannot call back into it — the overlay surfaces
 (`show_message_dialog` / `show_context_menu` / `show_toast`) and the OS actions
-(`open_path` / `reveal_in_file_manager` / `move_to_trash`) are reached through the
-deferred-action handle `QuiApp.actions()` returns instead. `FileManager` obtains that
-handle once in `__init__` and the handler calls it directly; the event pump drains the
-queue right after the dispatch that filled it.
+(`open_path` / `reveal_in_file_manager` / `move_to_trash` / `restore_from_trash`) are
+reached through the deferred-action handle `QuiApp.actions()` returns instead.
+`FileManager` obtains that handle once in `__init__` and the handler calls it directly;
+every pump — `QuiApp.step`, `run_tui()`, and `run_native()`'s GTK/AppKit/Win32 loops —
+drains the queue right after the dispatch that filled it, so the dialog, menu, toast and
+OS calls land on **every** backend from the same unchanged Python.
 
-`run_tui()` drains that queue, so **T1's actions work in a real terminal**.
-`run_native()`'s GTK/AppKit/Win32 loops do not drain it yet: an action queued while a
-native window is open sits there until the window closes. So in `--native`, the context
-menu, confirm dialog, toast and OS calls do not appear — that is a quadraui-py gap, not
-a descriptor difference, and the same Python drives both backends unchanged.
+The toast's **Undo** button restores the trashed path for real, via
+`restore_from_trash`. It is one-shot per delete: a second restore of the same path finds
+nothing in the trash and fails *inside* the pump, where the app cannot catch it, so a
+repeat click is refused ("nothing left to undo") instead of queued. On **macOS** there
+is no programmatic trash-restore API to delegate to, so the button is not offered there
+at all (`UNDO_SUPPORTED` in `app.py`) — a host capability, not a backend branch.
 
-The toast's **Undo** button is an affordance only — nothing in quadraui can restore a
-path out of the OS trash, so clicking it reports that rather than pretending to.
+A right-click would be the natural way to raise the context menu, but the pinned
+quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
+them, so `Menu` is the keyboard stand-in.
 
 ## quadraui dependency
 
