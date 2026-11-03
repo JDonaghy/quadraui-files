@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quadraui-files"
+version = "0.1.0"
+description = "A cross-backend file manager built on quadraui's Python bindings — the same code runs in the terminal (TUI) and as a native desktop window."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "John Donaghy" }]
+keywords = ["quadraui", "tui", "gui", "file-manager", "cross-platform"]
+
+# quadraui-py lags PyPI, so the Python bindings are built from the quadraui
+# repo at a pinned develop commit. Bump this SHA to pick up new quadraui
+# features (requires a Rust toolchain + maturin at install time — see CI).
+dependencies = [
+    "quadraui @ git+https://github.com/JDonaghy/quadraui.git@3fef543c68f2da2106d1947631bf6c04e7a485c2#subdirectory=quadraui-py",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+quadraui-files = "quadraui_files.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/JDonaghy/quadraui-files"
+quadraui = "https://github.com/JDonaghy/quadraui"
+
+[tool.hatch.metadata]
+# Required for the quadraui @ git+... direct-reference dependency above.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quadraui_files"]
