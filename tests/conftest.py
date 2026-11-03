@@ -10,6 +10,39 @@ import pytest
 from quadraui_files import FileManager
 
 
+class _NoDesktopActions:
+    """Wraps a real `QuiAppActions` handle, recording `open_path` and
+    `reveal_in_file_manager` instead of queuing them. Those hand the path to
+    the desktop, which on a Mac really opens TextEdit/Finder windows for
+    every run of the suite. Everything else delegates to the real handle --
+    trash and restore included, since tests assert on their effect on disk."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.opened: list[str] = []
+        self.revealed: list[str] = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def open_path(self, path: str) -> None:
+        self.opened.append(path)
+
+    def reveal_in_file_manager(self, path: str) -> None:
+        self.revealed.append(path)
+
+
+@pytest.fixture(autouse=True)
+def _no_desktop_windows(monkeypatch):
+    real_init = FileManager.__init__
+
+    def init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        self.actions = _NoDesktopActions(self.actions)
+
+    monkeypatch.setattr(FileManager, "__init__", init)
+
+
 def _make_tree(root: Path) -> Path:
     (root / "alpha").mkdir()
     (root / "beta").mkdir()

@@ -102,6 +102,7 @@ def test_window_title_tracks_navigation_into_a_folder(sample_tree):
     `set_title` call -- not just updates this app's own cache of it, which
     a spy around `fm.actions` catches even if the real call were deleted."""
     fm = FileManager(sample_tree, width=60, height=20)
+    fm.live_title = True  # what `cli.py` sets before `run_tui`/`run_native`
     spy = _ActionSpy(fm.actions)
     fm.actions = spy
 
@@ -111,6 +112,22 @@ def test_window_title_tracks_navigation_into_a_folder(sample_tree):
     assert "alpha" in fm.window_title
     assert fm.window_title == _window_title(fm.cursor.path)
     assert spy.titles == [fm.window_title]
+
+
+def test_a_headless_run_never_writes_a_title_escape_to_stdout(sample_tree, capfd):
+    """With no terminal or window to title (Python driving `step`, piped
+    output), construction and navigation keep the title cache current but
+    send nothing: the TUI backend's `set_title` would write a raw OSC escape
+    into the program's output."""
+    fm = FileManager(sample_tree, width=60, height=20)
+    spy = _ActionSpy(fm.actions)
+    fm.actions = spy
+
+    fm.step(_key_event(DOWN_KEY))
+
+    assert "alpha" in fm.window_title
+    assert spy.titles == []
+    assert "\x1b]" not in capfd.readouterr().out
 
 
 def test_opening_and_cancelling_a_rename_never_raises_on_the_tui_backend(sample_tree):

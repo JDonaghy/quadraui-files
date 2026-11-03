@@ -35,6 +35,7 @@ def test_selecting_and_opening_a_file_queues_open_path_without_raising(sample_tr
     _activate_child(fm, "readme.txt")  # select + queue `open_path` -- must not raise
     assert fm.selected_file is not None and fm.selected_file.name == "readme.txt"
     assert "readme.txt" in fm.app.screen()
+    assert fm.actions.opened == [str(sample_tree / "readme.txt")]
 
 
 def test_delete_confirm_flow_removes_file_and_shows_undo_toast(sample_tree):

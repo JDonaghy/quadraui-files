@@ -62,12 +62,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if "--tui" in flags:
         _wrap_quit(fm)  # real terminal: raw mode, live redraw on key events
+        fm.start_live_title()
         try:
             fm.app.run_tui()
         except _Quit:
             pass
     elif "--native" in flags:
         _wrap_quit(fm)  # OS window: AppKit / GTK / Win32 per the built feature
+        fm.live_title = True  # `run_native(title=...)` sets the initial one
         # Only safe to flip right here, right before the one call that
         # actually opens a real native window -- see `FileManager.
         # native_window_chrome`/`native_tray`'s own docs for why this reads
