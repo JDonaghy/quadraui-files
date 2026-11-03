@@ -35,3 +35,10 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quadraui_files"]
+
+[tool.pytest.ini_options]
+# `pythonpath` keeps a bare `pytest -q` from the repo root working off the
+# source tree, so the suite only needs `quadraui` importable in the active
+# virtualenv -- not a successful install of this project on top of it.
+testpaths = ["tests"]
+pythonpath = ["src"]
