@@ -36,7 +36,7 @@ Interaction (keyboard drives, mouse works too):
                button puts the trashed path back
   Menu         open a context menu (Open / Reveal in file manager / Move to
                Trash) for the selected file or the cursored folder
-  /            open the bottom filter box; typing narrows the active
+  /            open the bottom filter box; typing narrows every open
                details table live, Enter closes the box (filter stays
                applied), Esc closes it and clears the filter
   F2           open an inline rename box seeded with the selected file's
@@ -45,8 +45,9 @@ Interaction (keyboard drives, mouse works too):
   click a tree row         select it and toggle its expansion
   activate a details row   drill into that subfolder, or open a file with
                             the OS's default app for it
-  click a details header   sort the active details table by that column;
-                            click the same header again to reverse it
+  click a details header   sort every open details table by that column
+                            (marked with ▲/▼ on the active header); click
+                            the same header again to reverse it
   click a tab / its ×      switch to / close that tab
   q / Escape   quit the real run loops
 
@@ -76,6 +77,7 @@ needing to run between events.
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -134,6 +136,23 @@ def _safe_mtime(path: Path) -> float | None:
 def _sort_key(node: Node) -> tuple[bool, str]:
     """Directories first, then case-insensitive name."""
     return (not node.is_dir, node.name.lower())
+
+
+def _invalid_rename_name(new_name: str) -> str | None:
+    """None if `new_name` is safe to rename onto; otherwise a human-readable
+    reason it's rejected. A path separator (`/`, or `os.sep`/`os.altsep` on
+    this platform) makes `Path.with_name` raise `ValueError` instead of the
+    `OSError` a failed rename raises, so it has to be caught here rather
+    than relying on that except clause. A name that is only dots (`.`/`..`)
+    raises the same way. A leading dot is rejected too: `load_children`
+    skips dotfiles, so a renamed entry would silently vanish from the
+    listing on the very next refresh."""
+    separators = {"/", os.sep, os.altsep} - {None}
+    if any(sep in new_name for sep in separators):
+        return "name can't contain a path separator"
+    if new_name.startswith("."):
+        return "hidden names aren't shown here"
+    return None
 
 
 def load_children(node: Node) -> None:
@@ -295,10 +314,17 @@ def _human_size(n: int | None) -> str:
 
 
 def _human_mtime(ts: float | None) -> str:
-    """Human-readable last-modified timestamp; "" if unreadable."""
+    """Human-readable last-modified timestamp; "" if unreadable or
+    out of `datetime`'s representable range -- a pathological `st_mtime`
+    (`OverflowError`/`OSError`/`ValueError`) must not break the whole
+    details table it renders inside, same as `_safe_size`/`_safe_mtime`
+    are defensive about a bad `stat()`."""
     if ts is None:
         return ""
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def _filter_children(children: list[Node], query: str) -> list[Node]:
@@ -310,34 +336,55 @@ def _filter_children(children: list[Node], query: str) -> list[Node]:
     return [c for c in children if q in c.name.lower()]
 
 
+def _size_sort_key(node: Node) -> tuple[bool, int]:
+    """Size ascending, with a missing value (a directory's size) first."""
+    return (node.size_bytes is None, node.size_bytes or 0)
+
+
+def _mtime_sort_key(node: Node) -> tuple[bool, float]:
+    """Modified-time ascending, with a missing value first."""
+    return (node.mtime is None, node.mtime or 0.0)
+
+
+_COLUMN_SORT_KEYS = {0: _sort_key, 1: _size_sort_key, 2: _mtime_sort_key}
+
+
 def _sort_children(children: list[Node], col: int, reverse: bool) -> list[Node]:
     """`children` ordered by details-table column `col` (0 Name, 1 Size, 2
     Modified). Name sorts directories first then case-insensitive name --
     the tree's own order, so the unsorted (`col == 0`, not `reverse`) case
     matches a freshly loaded folder exactly. Size/Modified sort purely by
     value, with a missing value (a directory's size) sorting first."""
-    if col == 1:
-        key = lambda n: (n.size_bytes is None, n.size_bytes or 0)
-    elif col == 2:
-        key = lambda n: (n.mtime is None, n.mtime or 0.0)
-    else:
-        key = _sort_key
+    key = _COLUMN_SORT_KEYS.get(col, _sort_key)
     ordered = sorted(children, key=key)
     return list(reversed(ordered)) if reverse else ordered
 
 
-def details_table(folder: Node, index: int, *, children: list[Node] | None = None) -> dict:
+def details_table(
+    folder: Node,
+    index: int,
+    *,
+    children: list[Node] | None = None,
+    sort_col: int = 0,
+    sort_reverse: bool = False,
+) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
     content subtree of tab `index`. `children` is the rows' display order
     (filtered/sorted by the caller); defaults to `folder.children` as-is.
     Row order matches `children`, so a `RowActivated{idx}` maps straight
-    back to the same list the caller used to build it."""
+    back to the same list the caller used to build it. `sort_col`/
+    `sort_reverse` only drive a `▲`/`▼` marker on the active column's
+    title -- the actual ordering is `children`'s, already sorted by the
+    caller."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
         {"title": "Size", "width": {"Flex": 1.0}, "align": "Right"},
         {"title": "Modified", "width": {"Flex": 1.5}, "align": "Left"},
     ]
+    if 0 <= sort_col < len(columns):
+        arrow = "▼" if sort_reverse else "▲"
+        columns[sort_col] = {**columns[sort_col], "title": f"{columns[sort_col]['title']} {arrow}"}
 
     all_children = folder.children or []
     shown = all_children if children is None else children
@@ -645,7 +692,10 @@ class FileManager:
 
     def _on_header_clicked(self, col: int) -> None:
         """A details-table header click: sort by that column, or reverse the
-        current sort if it's already the active column."""
+        current sort if it's already the active column. `sort_col`/
+        `sort_reverse` are app-global, so this re-sorts every open details
+        table, not just the one the click came from -- `_details_pane`
+        applies them to every tab."""
         if self.sort_col == col:
             self.sort_reverse = not self.sort_reverse
         else:
@@ -738,26 +788,35 @@ class FileManager:
             self.filter_text = self.edit_text
 
     def _handle_edit_key(self, event: dict) -> bool:
-        """Every event while the filter/rename box is open goes through
-        here instead of the normal dispatch -- always returns True so
-        `_handle` swallows it rather than falling through to navigation.
-        A real `--tui` session never emits `CharTyped` for a plain
-        keystroke (crossterm has no such variant -- every character lands
-        as `KeyPressed{Char}`, same as this app's other single-letter
+        """Key events while the filter/rename box is open go through here
+        instead of the normal dispatch -- returns True so `_handle`
+        swallows them rather than falling through to navigation. A real
+        `--tui` session never emits `CharTyped` for a plain keystroke
+        (crossterm has no such variant -- every character lands as
+        `KeyPressed{Char}`, same as this app's other single-letter
         shortcuts), so a bare printable `Char` is treated as typed text
         here too; `CharTyped` is still honoured for native/GTK hosts and
-        for a test pushing it directly."""
+        for a test pushing it directly.
+
+        Returns False for anything that isn't a key event at all --
+        `MessageDialogResolved`, `ToastActionClicked`, a `DataTable`/`Tree`/
+        `TabBar` activation, a divider drag -- so `_handle` falls through
+        to its normal dispatch for those instead of silently dropping them
+        (e.g. the undo toast's button still works while the filter box is
+        open)."""
         if "CharTyped" in event:
             self._edit_insert(event["CharTyped"])
             return True
         key = _event_key(event)
+        if key is None:
+            return False
         if key == "Backspace":
             self._edit_backspace()
         elif key == "Enter":
             self._commit_edit()
         elif key == "Escape":
             self._cancel_edit()
-        elif key is not None and len(key) == 1:
+        elif len(key) == 1:
             self._edit_insert(key)
         # else: a non-printable named key (Up/Down/Tab/F2/...) -- ignore.
         return True
@@ -784,18 +843,31 @@ class FileManager:
         """Commit a pending rename: a real `Path.rename`, then update the
         model in place (name, path, and every loaded descendant's path) so
         the tree/details listing reflects it without a reload. A no-op
-        name, a name collision, or an OS failure reports a message and
-        leaves the node untouched."""
+        name, an invalid name, a name collision, or an OS failure reports a
+        message and leaves the node untouched."""
         new_name = new_name.strip()
         if node is None or not new_name or new_name == node.name:
             return
+        invalid = _invalid_rename_name(new_name)
+        if invalid is not None:
+            self.message = invalid
+            return
         new_path = node.path.with_name(new_name)
         if new_path.exists():
-            self.message = f'"{new_name}" already exists'
-            return
+            # A case-only rename (`README.txt` -> `readme.txt`) legitimately
+            # resolves to the same file on a case-insensitive filesystem;
+            # only a genuinely different, already-occupied path is a
+            # collision.
+            try:
+                same_file = new_path.samefile(node.path)
+            except OSError:
+                same_file = False
+            if not same_file:
+                self.message = f'"{new_name}" already exists'
+                return
         try:
             node.path.rename(new_path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self.message = f"rename failed: {exc}"
             return
         node.path = new_path
@@ -959,7 +1031,11 @@ class FileManager:
                         "content": {
                             "id": f"fm:grid:{i}",
                             "data_table": details_table(
-                                folder, i, children=self._visible_children(folder)
+                                folder,
+                                i,
+                                children=self._visible_children(folder),
+                                sort_col=self.sort_col,
+                                sort_reverse=self.sort_reverse,
                             ),
                         },
                     }
@@ -1046,15 +1122,20 @@ class FileManager:
         # one line if the real terminal is a different size. Drags on this outer
         # divider are ignored by the handler (it keys on the body split's id).
         # The filter/rename text_input needs 3 rows (every backend borders it,
-        # even TUI), so the bottom pane grows to 3 while `edit_mode` is set.
+        # even TUI), so the bottom pane grows to 3 while `edit_mode` is set --
+        # but never past what the chrome's own 3.0 `first_min` leaves available,
+        # so the two mins can never sum past the viewport on a tiny terminal
+        # (e.g. `h == 4` would otherwise ask for 3.0 + 3.0 of 4.0 rows).
         h = max(self.height, 2)
-        bottom_rows = min(3.0, float(h - 1)) if self.edit_mode else 1.0
+        first_min = 3.0
+        available_for_bottom = max(1.0, h - first_min)
+        bottom_rows = min(3.0, available_for_bottom) if self.edit_mode else 1.0
         return {
             "split": {
                 "id": "fm:outer",
                 "orientation": "vertical",  # chrome+body stacked over the status bar
                 "ratio": (h - bottom_rows) / h,
-                "first_min": 3.0,
+                "first_min": first_min,
                 "second_min": bottom_rows,
                 "first": chrome,
                 "second": self._edit_leaf() if self.edit_mode else self._status_leaf(),
