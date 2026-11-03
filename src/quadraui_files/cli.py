@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .app import FileManager, _dump_steps, _run_headless, _wrap_quit, _Quit
+from .app import FileManager, _NATIVE_BACKEND, _Quit, _dump_steps, _run_headless, _wrap_quit
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,12 +33,13 @@ def main(argv: list[str] | None = None) -> int:
     elif "--native" in flags:
         _wrap_quit(fm)  # OS window: AppKit / GTK / Win32 per the built feature
         # Only safe to flip right here, right before the one call that
-        # actually opens a real macOS window -- see `FileManager.
-        # native_window_chrome`'s own doc for why a TUI session on a Mac
-        # must never set this.
-        fm.native_window_chrome = sys.platform == "darwin"
+        # actually opens a real native window -- see `FileManager.
+        # native_window_chrome`/`native_tray`'s own docs for why this reads
+        # the *built* backend (`_NATIVE_BACKEND`), not the host OS.
+        fm.native_window_chrome = _NATIVE_BACKEND == "macos"
+        fm.native_tray = _NATIVE_BACKEND in ("gtk", "macos", "win")
         try:
-            fm.app.run_native(title=fm._window_title)
+            fm.app.run_native(title=fm.window_title)
         except _Quit:
             pass
     else:

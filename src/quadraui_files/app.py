@@ -97,6 +97,20 @@ from pathlib import Path
 
 from quadraui import InternalError, QuadrauiError, QuiApp
 
+try:
+    # Which native backend (if any) a `run_native()` call on this build would
+    # actually open -- `"gtk"` / `"macos"` / `"win"` / `None` (headless-only
+    # build, or no feature enabled). Decided by the *built* Cargo feature, not
+    # the host OS a `sys.platform` check would read -- a `--features gtk`
+    # build runs fine on macOS, for instance. Not re-exported by `quadraui`'s
+    # own `__init__.py`, only reachable through its compiled extension
+    # submodule; `ImportError` means an older `quadraui-py` build that
+    # predates this attribute, so this app treats that the same as "no native
+    # backend built in" rather than failing to import at all.
+    from quadraui._quadraui import _NATIVE_BACKEND
+except ImportError:  # pragma: no cover - defensive, see doc above
+    _NATIVE_BACKEND = None
+
 # Can a trashed path be put back? `restore_from_trash` is implemented for the
 # freedesktop.org trash spec (Linux/BSD) and the Windows recycle bin, and
 # raises on macOS, which exposes no programmatic trash listing to delegate to.
@@ -721,13 +735,16 @@ def _tooltip_payload(widget_id: str, node: Node) -> dict:
 # C13: the window title tracks the current path, a dirty-dot (and, on macOS,
 # a represented-filename proxy icon) marks a pending rename, a tray icon +
 # menu appear where the backend has one, and the pointer cursor swaps to a
-# resize glyph during a divider drag.
+# resize glyph during a divider drag, restored once the drag ends.
 #
 # Each of the four calls this needs has a different safety story on the
 # backend this app's own `self.app` always talks to (the headless
 # `TuiBackend` -- see the module doc's reentrancy note for why `run_native`
 # moving the app's descriptors/handlers onto a real GTK/AppKit/Win32 window
-# doesn't change which backend `self.app` itself queries):
+# doesn't change which backend `self.app` itself queries, but *does* change
+# which backend a deferred action queued through `self.actions` is drained
+# against -- that queue is replayed by whichever loop, `run_tui` or
+# `run_native`, is actually pumping events when the handler fills it):
 #
 #   * `set_title` -- always safe. Every backend implements `WindowControl::
 #     set_title` (the TUI one via OSC 0/2), so `_sync_window_title` calls it
@@ -735,7 +752,9 @@ def _tooltip_payload(widget_id: str, node: Node) -> dict:
 #   * `set_cursor` -- always safe. `Backend::set_cursor` returns whether the
 #     glyph was actually applied rather than raising (`False`, never an
 #     error, on a backend with no native pointer concept), so a divider drag
-#     calls it unconditionally too.
+#     calls it unconditionally too, and the drag-ends-here reset (any event
+#     other than another divider drag, while `self._dragging` is set --
+#     typically `MouseUp`) calls it back to `"default"` the same way.
 #   * `set_document_edited` / `set_represented_filename` -- only `MacBackend`
 #     overrides either; every other backend (TUI included, even running on
 #     a Mac) inherits `WindowControl`'s default `BackendError::Unsupported`,
@@ -747,13 +766,24 @@ def _tooltip_payload(widget_id: str, node: Node) -> dict:
 #     there). So these two are gated on `self.native_window_chrome`, an
 #     opt-in flag this app never sets itself -- only `cli.py`/this module's
 #     own `__main__` block sets it, and only right before a `run_native()`
-#     call on `sys.platform == "darwin"`.
-#   * `set_tray_icon` / `set_tray_tooltip` / `set_tray_menu` -- gated on
-#     `backend_caps()["tray"]`, read once at startup. `Backend::tray`
-#     returns `None` permanently on `TuiBackend` (a terminal has no
-#     notification-area concept at all), so this is always skipped on that
-#     backend -- see `tests/test_window_tray.py`'s own caps tests, kept
-#     exactly for that reason.
+#     call where `_NATIVE_BACKEND == "macos"` (the *built* feature, not the
+#     host OS: a `--features gtk` build run on macOS must not set this).
+#   * `set_tray_icon` / `set_tray_tooltip` / `set_tray_menu` -- `Backend::
+#     tray` returns `None` permanently on `TuiBackend` (a terminal has no
+#     notification-area concept at all -- see `tests/test_window_tray.py`'s
+#     own caps tests, kept exactly for that reason), but `self.app.
+#     backend_caps()` always reads *that* dormant headless backend, even
+#     once `run_native` has moved this app's descriptors onto a real window
+#     -- `self.app` itself never queries any other backend (same reentrancy
+#     note as above), so `backend_caps()["tray"]` can never usefully gate
+#     this. Gated on `self.native_tray` instead, an opt-in flag exactly like
+#     `native_window_chrome`'s, set `True` where `_NATIVE_BACKEND` names any
+#     of the three native backends (all of which declare `tray: True`).
+#     Queued through `self.actions` from `_prime_native_chrome`, called once
+#     from the first `_handle` dispatch of a run loop that set the flag --
+#     not from `__init__`, which only ever owns the dormant headless
+#     backend and so could never make the tray appear regardless of what
+#     it called.
 
 
 def _window_title(path: Path) -> str:
@@ -905,8 +935,22 @@ class FileManager:
         # `InternalError` for either, which would tear down the whole
         # `run_tui`/`run_native` loop. `FileManager` never sets this itself;
         # `cli.py`/this module's own `__main__` sets it to `True` only right
-        # before a `run_native()` call on `sys.platform == "darwin"`.
+        # before a `run_native()` call where `_NATIVE_BACKEND == "macos"`.
         self.native_window_chrome = False
+        # Opt-in, same story as `native_window_chrome` just above but for
+        # the tray: `True` only where `_NATIVE_BACKEND` names a backend that
+        # actually has one (`"gtk"` / `"macos"` / `"win"`, all of which
+        # declare `tray: True`). `FileManager` never sets this itself either.
+        self.native_tray = False
+        # Latches the one-time native-chrome setup `_prime_native_chrome`
+        # does on the first `_handle` dispatch of whichever run loop set
+        # `native_window_chrome`/`native_tray` above -- see that method's
+        # own doc.
+        self._native_chrome_primed = False
+        # Set while a divider drag (C13) is live, between the
+        # `SplitDividerDragged` that sets the resize pointer cursor and
+        # whatever event ends the drag -- see `_dispatch`'s own doc.
+        self._dragging = False
         # `_tree_capacity` needs these, but `_render` -- which calls it --
         # cannot query them live: `QuiApp`'s constructor below renders frame
         # 0 synchronously, before `self.app` itself exists to query, and
@@ -958,24 +1002,26 @@ class FileManager:
         # exclusive borrow outright rather than needing the deferred-action
         # workaround a handler would. `_sync_window_title` (called from
         # `_handle`) takes over from here, through `self.actions`, once a
-        # run loop owns the app.
-        self._window_title = _window_title(self.cursor.path)
-        self.app.set_title(self._window_title)
-        # Tray icon + menu (C13): also top-level, also gated -- `self.app`'s
-        # own backend is the headless one (`run_native` moves this app's
-        # descriptors/handlers onto a real window; it does not change what
-        # `self.app` itself queries), which never has a tray, so this is a
-        # no-op on every backend reachable from this call. Wrapped the same
-        # defensive way as `register_accelerator`, above: a backend that
-        # declares `"tray"` but rejects one of the three calls anyway
-        # should not take `__init__` down with it.
-        if self.app.backend_caps()["tray"]:
-            try:
-                self.app.set_tray_icon({"Bytes": _tray_icon_png()})
-                self.app.set_tray_tooltip("quadraui-files")
-                self.app.set_tray_menu(_tray_menu_items())
-            except QuadrauiError:
-                pass
+        # run loop owns the app. Wrapped the same defensive way as
+        # `register_accelerator` just above: `TuiBackend::set_title` writes
+        # straight to `stdout`, so a closed/console-less process (piped
+        # output, a detached subprocess, ...) can fail this the same way a
+        # bad accelerator chord fails that loop -- one failed cosmetic call
+        # should not take the whole constructor down with it.
+        self._title_cache = _window_title(self.cursor.path)
+        try:
+            self.app.set_title(self._title_cache)
+        except QuadrauiError:
+            pass
+        # Tray icon + menu, and the represented-filename proxy icon for the
+        # start folder (C13): unlike the calls above, neither is safe to
+        # attempt here -- `self.app` only ever talks to the dormant headless
+        # backend at this point (see this section's own "native chrome"
+        # doc), so nothing done to `self.app`/`self.actions` in `__init__`
+        # could ever reach a real tray or window. `_prime_native_chrome`,
+        # called once from the first `_handle` dispatch instead, is what
+        # actually sets these up on a `native_tray`/`native_window_chrome`
+        # run.
 
     def _apply_system_theme(self) -> None:
         """OS theme match (C14): read the OS's light/dark preference once at
@@ -996,6 +1042,15 @@ class FileManager:
         self._status_bg = _STATUS_DARK_BG if dark else _STATUS_LIGHT_BG
         self._status_accent = _STATUS_DARK_ACCENT if dark else _STATUS_LIGHT_ACCENT
 
+    @property
+    def window_title(self) -> str:
+        """The title this app last set (or, before any event, the one
+        `__init__` set at construction) -- `cli.py`'s/this module's own
+        `__main__`'s public read of `_title_cache`, so a `run_native()`
+        caller doesn't have to reach into a private attribute to derive its
+        own `title=` argument from the start path."""
+        return self._title_cache
+
     def _sync_window_title(self) -> None:
         """Window title (C13), called from `_handle` after every event:
         if the cursored folder changed since the last call, queues a
@@ -1007,12 +1062,42 @@ class FileManager:
         when the *displayed* title would actually change (not, e.g., on
         every keystroke that leaves the cursor on the same node)."""
         title = _window_title(self.cursor.path)
-        if title == self._window_title:
+        if title == self._title_cache:
             return
-        self._window_title = title
+        self._title_cache = title
         self.actions.set_title(title)
         if self.native_window_chrome:
             self.actions.set_represented_filename(str(self.cursor.path))
+
+    def _prime_native_chrome(self) -> None:
+        """One-time native-chrome setup, called from the top of `_handle` on
+        the first dispatch of whichever run loop set `native_window_chrome`/
+        `native_tray` (`__init__` can't do this itself -- see this module's
+        "native chrome" doc, above `_window_title`, for why `self.app`/
+        `self.actions` there could never reach a real window or tray).
+
+        A represented-filename proxy icon for the *start* folder, where
+        `native_window_chrome` says that's safe -- `_sync_window_title`
+        only ever queues one when the cursor actually moves, which the
+        start folder by definition hasn't done yet.
+
+        A tray icon, tooltip and menu, where `native_tray` says the live
+        backend has one. Wrapped the same defensive way as
+        `register_accelerator` in `__init__`: a backend that declares a
+        tray but rejects one of the three calls anyway should not break
+        the run loop its own first dispatch is part of."""
+        if self._native_chrome_primed:
+            return
+        self._native_chrome_primed = True
+        if self.native_window_chrome:
+            self.actions.set_represented_filename(str(self.cursor.path))
+        if self.native_tray:
+            try:
+                self.actions.set_tray_icon({"Bytes": _tray_icon_png()})
+                self.actions.set_tray_tooltip("quadraui-files")
+                self.actions.set_tray_menu(_tray_menu_items())
+            except QuadrauiError:
+                pass
 
     # --- navigation helpers --------------------------------------------------
 
@@ -1704,11 +1789,13 @@ class FileManager:
         }
 
     def _handle(self, event) -> None:
-        """Per-event entry point: `_dispatch` does the real work, then this
-        syncs the window title (C13) against wherever the cursor landed --
-        after every event, not just a navigation one, so it still catches
-        a `TabClosed`/`_forget` pulling the cursor back onto a different
-        node with no dedicated "move" call of its own."""
+        """Per-event entry point: primes native chrome (C13) on the very
+        first dispatch of a run that opted into it, then `_dispatch` does
+        the real work, then this syncs the window title against wherever
+        the cursor landed -- after every event, not just a navigation one,
+        so it still catches a `TabClosed`/`_forget` pulling the cursor back
+        onto a different node with no dedicated "move" call of its own."""
+        self._prime_native_chrome()
         self._dispatch(event)
         self._sync_window_title()
 
@@ -1721,6 +1808,16 @@ class FileManager:
             return
         if not isinstance(event, dict):
             return
+
+        if self._dragging and "SplitDividerDragged" not in event:
+            # The divider drag that set the resize cursor, below, has ended
+            # -- `MouseUp` is the event the engine actually sends, but any
+            # other event arriving instead (focus loss, a resize, ...) means
+            # the drag is just as over, so this doesn't key specifically off
+            # `MouseUp`. Restore the pointer before falling through to this
+            # event's own handling (a `MouseUp` itself has none here).
+            self._dragging = False
+            self.actions.set_cursor("default")
 
         if self.edit_mode is not None and self._handle_edit_key(event):
             return
@@ -1784,11 +1881,14 @@ class FileManager:
                 # Pointer cursor (C13): both dividers are vertical (panes
                 # side by side -- see `_render`'s own comment), so
                 # `"col_resize"` rather than the compass-edge `"resize"`
-                # shape. Always safe to call: `set_cursor` answers whether
-                # the glyph was actually applied rather than raising (see
-                # this section's own "native chrome" doc), `False` rather
-                # than an error on a backend -- the TUI one included --
-                # with no native pointer concept at all.
+                # shape. Always safe to call: `QuiAppActions.set_cursor`
+                # queues the shape for whichever backend is live when the
+                # queue next drains rather than raising for one that can't
+                # show it -- the TUI one included, which has no native
+                # pointer concept at all (see this section's own "native
+                # chrome" doc). `self._dragging`, reset by the top of this
+                # method once the drag ends, is what restores `"default"`.
+                self._dragging = True
                 self.actions.set_cursor("col_resize")
 
     def _on_key(self, name: str) -> None:
@@ -1988,11 +2088,13 @@ if __name__ == "__main__":
     elif "--native" in flags:
         _wrap_quit(fm)  # OS window: GTK / AppKit / Win32 per the built feature
         # Only safe to flip right here, right before the one call that
-        # actually opens a real macOS window -- see `native_window_chrome`'s
-        # own doc for why a TUI session on a Mac must never set this.
-        fm.native_window_chrome = sys.platform == "darwin"
+        # actually opens a real native window -- see `native_window_chrome`/
+        # `native_tray`'s own docs for why this reads the *built* backend
+        # (`_NATIVE_BACKEND`), not the host OS.
+        fm.native_window_chrome = _NATIVE_BACKEND == "macos"
+        fm.native_tray = _NATIVE_BACKEND in ("gtk", "macos", "win")
         try:
-            fm.app.run_native(title=fm._window_title)
+            fm.app.run_native(title=fm.window_title)
         except _Quit:
             pass
     else:
