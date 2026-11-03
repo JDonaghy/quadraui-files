@@ -16,7 +16,7 @@ keywords = ["quadraui", "tui", "gui", "file-manager", "cross-platform"]
 # repo at a pinned develop commit. Bump this SHA to pick up new quadraui
 # features (requires a Rust toolchain + maturin at install time — see CI).
 dependencies = [
-    "quadraui @ git+https://github.com/JDonaghy/quadraui.git@cea50d5296734c76a8b3fdfc7c413c8ba11bfd64#subdirectory=quadraui-py",
+    "quadraui @ git+https://github.com/JDonaghy/quadraui.git@db84d7ae963cd77c9185300d59b19e3cabfefea7#subdirectory=quadraui-py",
 ]
 
 [project.optional-dependencies]
