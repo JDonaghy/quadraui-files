@@ -1,6 +1,11 @@
 __pycache__/
 *.py[cod]
-.venv/
+# A provisioned in-tree virtualenv is ignored, except the one tracked file that
+# makes `. .venv/bin/activate` work in a bare checkout (see that file's header).
+.venv/*
+!.venv/bin/
+.venv/bin/*
+!.venv/bin/activate
 venv/
 *.egg-info/
 dist/
