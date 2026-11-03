@@ -669,6 +669,25 @@ ACCELERATORS = [
 ]
 
 
+# --- native chrome: window title / dirty-dot / tray / cursor (not yet reachable) --
+#
+# C13 (window title tracking the current path, a dirty-dot during a pending
+# rename, a tray icon + menu, and a pointer-cursor swap during a divider
+# drag) needs four calls this installed quadraui-py does not expose on
+# `QuiApp` or `QuiApp.actions()`: a `WindowControl::set_title` /
+# `set_document_edited` / `set_represented_filename` binding, a `TrayService`
+# binding (icon + menu + click routing), and a `PointerCursor::set_cursor`
+# binding. `QuiApp.backend_caps()` already reports the matching capability
+# names (`"window_control"`, `"tray"`, `"pointer_cursor"` -- see
+# `tests/test_window_tray.py`) because the underlying Rust `Backend` trait
+# methods are implemented for the GTK/AppKit/Win32 backends (and, for
+# `window_control`, even the TUI one, via OSC 0/1/2), but nothing in
+# `quadraui-py`'s PyO3 surface calls into them yet -- the same "`QuiApp`
+# doesn't carry the method" gap `test_chrome.py`'s own doc already notes for
+# tooltips/notifications. There is no reachable way to wire any of C13 from
+# this app until that binding work lands upstream.
+
+
 # --- the live QuiApp ---------------------------------------------------------
 #
 # event -> handler mutates plain Python attributes -> the runner repaints ->
