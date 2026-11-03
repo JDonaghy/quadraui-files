@@ -36,9 +36,17 @@ Interaction (keyboard drives, mouse works too):
                button puts the trashed path back
   Menu         open a context menu (Open / Reveal in file manager / Move to
                Trash) for the selected file or the cursored folder
+  /            open the bottom filter box; typing narrows the active
+               details table live, Enter closes the box (filter stays
+               applied), Esc closes it and clears the filter
+  F2           open an inline rename box seeded with the selected file's
+               (or cursored folder's) name; Enter commits a real rename on
+               disk, Esc cancels
   click a tree row         select it and toggle its expansion
   activate a details row   drill into that subfolder, or open a file with
                             the OS's default app for it
+  click a details header   sort the active details table by that column;
+                            click the same header again to reverse it
   click a tab / its ×      switch to / close that tab
   q / Escape   quit the real run loops
 
@@ -70,6 +78,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from quadraui import QuiApp
@@ -97,6 +106,7 @@ class Node:
     path: Path
     is_dir: bool
     size_bytes: int | None = None
+    mtime: float | None = None
     parent: "Node | None" = field(default=None, repr=False)
     children: list["Node"] | None = None
     expanded: bool = False
@@ -110,6 +120,13 @@ class Node:
 def _safe_size(path: Path) -> int | None:
     try:
         return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _safe_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
     except OSError:
         return None
 
@@ -137,6 +154,7 @@ def load_children(node: Node) -> None:
             path=child,
             is_dir=child.is_dir(),
             size_bytes=None if child.is_dir() else _safe_size(child),
+            mtime=_safe_mtime(child),
             parent=node,
         )
         for child in entries
@@ -150,6 +168,16 @@ def ensure_loaded(node: Node) -> None:
     """Load `node`'s children once; cheap no-op if already loaded or a file."""
     if node.is_dir and node.children is None:
         load_children(node)
+
+
+def _reparent_paths(node: Node) -> None:
+    """After `node.path` changes (a rename), fix every already-loaded
+    descendant's cached `path` to sit under it. Children were computed by
+    `iterdir()` under the old path and would otherwise keep pointing at a
+    location that no longer exists once the rename lands on disk."""
+    for child in node.children or ():
+        child.path = node.path / child.name
+        _reparent_paths(child)
 
 
 def build_root(root_path: Path) -> Node:
@@ -266,30 +294,70 @@ def _human_size(n: int | None) -> str:
     return f"{int(size)} {_SIZE_UNITS[i]}" if i == 0 else f"{size:.1f} {_SIZE_UNITS[i]}"
 
 
-def details_table(folder: Node, index: int) -> dict:
+def _human_mtime(ts: float | None) -> str:
+    """Human-readable last-modified timestamp; "" if unreadable."""
+    if ts is None:
+        return ""
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _filter_children(children: list[Node], query: str) -> list[Node]:
+    """`children` narrowed to those whose name contains `query`
+    (case-insensitive); an empty/blank query matches everything."""
+    q = query.strip().lower()
+    if not q:
+        return list(children)
+    return [c for c in children if q in c.name.lower()]
+
+
+def _sort_children(children: list[Node], col: int, reverse: bool) -> list[Node]:
+    """`children` ordered by details-table column `col` (0 Name, 1 Size, 2
+    Modified). Name sorts directories first then case-insensitive name --
+    the tree's own order, so the unsorted (`col == 0`, not `reverse`) case
+    matches a freshly loaded folder exactly. Size/Modified sort purely by
+    value, with a missing value (a directory's size) sorting first."""
+    if col == 1:
+        key = lambda n: (n.size_bytes is None, n.size_bytes or 0)
+    elif col == 2:
+        key = lambda n: (n.mtime is None, n.mtime or 0.0)
+    else:
+        key = _sort_key
+    ordered = sorted(children, key=key)
+    return list(reversed(ordered)) if reverse else ordered
+
+
+def details_table(folder: Node, index: int, *, children: list[Node] | None = None) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
-    content subtree of tab `index`. Row order matches `folder.children`, so a
-    `RowActivated{idx}` maps straight back to a child node."""
+    content subtree of tab `index`. `children` is the rows' display order
+    (filtered/sorted by the caller); defaults to `folder.children` as-is.
+    Row order matches `children`, so a `RowActivated{idx}` maps straight
+    back to the same list the caller used to build it."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
         {"title": "Size", "width": {"Flex": 1.0}, "align": "Right"},
-        {"title": "Kind", "width": {"Flex": 1.0}, "align": "Left"},
+        {"title": "Modified", "width": {"Flex": 1.5}, "align": "Left"},
     ]
 
-    children = folder.children or []
-    if not children:
-        note = "(unreadable)" if folder.load_error else "(empty folder)"
+    all_children = folder.children or []
+    shown = all_children if children is None else children
+    if not shown:
+        if folder.load_error:
+            note = "(unreadable)"
+        elif all_children:
+            note = "(no matches)"
+        else:
+            note = "(empty folder)"
         rows = [{"cells": [_styled_text(note), _styled_text(""), _styled_text("")]}]
     else:
         rows = []
-        for child in children:
+        for child in shown:
             # A trailing "/" hints the row is navigable (activate to drill in).
             name = f"{child.name}/" if child.is_dir else child.name
-            kind = "folder" if child.is_dir else "file"
             size = "" if child.is_dir else _human_size(child.size_bytes)
+            modified = _human_mtime(child.mtime)
             rows.append(
-                {"cells": [_styled_text(name), _styled_text(size), _styled_text(kind)]}
+                {"cells": [_styled_text(name), _styled_text(size), _styled_text(modified)]}
             )
 
     return {"id": table_id, "columns": columns, "rows": rows}
@@ -314,6 +382,8 @@ TOOLBAR = {
         {"Action": {"id": "fm:k:refresh", "label": "r Refresh"}},
         {"Action": {"id": "fm:k:delete", "label": "Del Trash"}},
         {"Action": {"id": "fm:k:menu", "label": "Menu ≡"}},
+        {"Action": {"id": "fm:k:search", "label": "/ Search"}},
+        {"Action": {"id": "fm:k:rename", "label": "F2 Rename"}},
     ],
 }
 
@@ -351,12 +421,18 @@ MENU_KEY = {"Named": "Menu"}  # the dedicated "open context menu" key
 
 def _key_name(key) -> str | None:
     """Canonical name of a raw key. A plain `KeyPressed` carries a tagged dict
-    (`{"Named": "Down"}` / `{"Char": "o"}`); a focus-scoped leaf event carries
-    the already-stringified name (`"Down"` / `"o"`). Both collapse to the name."""
+    (`{"Named": "Down"}` / `{"Named": {"F": 2}}` / `{"Char": "o"}`); a
+    focus-scoped leaf event carries the already-stringified name (`"Down"` /
+    `"o"`). Both collapse to the name -- a function key becomes `"F2"`."""
     if isinstance(key, str):
         return key
     if isinstance(key, dict):
-        return key.get("Named") or key.get("Char")
+        named = key.get("Named")
+        if isinstance(named, dict) and "F" in named:
+            return f"F{named['F']}"
+        if isinstance(named, str):
+            return named
+        return key.get("Char")
     return None
 
 
@@ -395,6 +471,14 @@ class FileManager:
         self.active_tab = 0             # index into self.open
         self.message = ""               # transient status hint
         self.selected_file: Node | None = None  # last file activated in a details tab
+
+        # Filter/sort/rename state for the active details table.
+        self.filter_text = ""           # live search query; "" narrows nothing
+        self.sort_col = 0               # details column last clicked (0 Name/1 Size/2 Modified)
+        self.sort_reverse = False       # reversed by a second click on the same column
+        self.edit_mode: str | None = None  # None | "filter" | "rename": which box the bottom panel shows
+        self.edit_text = ""             # live buffer for whichever box is open
+        self.rename_target: Node | None = None  # node a "rename" edit_mode would commit onto
 
         # Which node the currently open confirm dialog / context menu is for,
         # so the `MessageDialogResolved` / `ContextMenuItemActivated` event that
@@ -548,13 +632,35 @@ class FileManager:
                     node.expanded = not node.expanded
                 return
 
+    def _visible_children(self, folder: Node) -> list[Node]:
+        """`folder`'s children in the details table's current display order:
+        narrowed by the live filter query, then ordered by whichever column
+        was last clicked (Name/Size/Modified, ascending or reversed). With
+        no filter and the default Name/ascending sort this is exactly
+        `folder.children` -- a freshly loaded folder is already sorted that
+        way -- so `RowActivated{idx}` keeps mapping straight back to it."""
+        children = folder.children or []
+        shown = _filter_children(children, self.filter_text)
+        return _sort_children(shown, self.sort_col, self.sort_reverse)
+
+    def _on_header_clicked(self, col: int) -> None:
+        """A details-table header click: sort by that column, or reverse the
+        current sort if it's already the active column."""
+        if self.sort_col == col:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_col = col
+            self.sort_reverse = False
+
     def _activate_detail(self, idx: int) -> None:
         """A details-table row was activated (clicked): drill into a subfolder,
-        or select the file and queue opening it with the OS's default app."""
+        or select the file and queue opening it with the OS's default app.
+        `idx` indexes the same filtered/sorted order the table was painted
+        with, not raw `folder.children`."""
         if not self.open:
             return
         folder = self.open[self.active_tab]
-        children = folder.children or []
+        children = self._visible_children(folder)
         if not (0 <= idx < len(children)):
             return
         child = children[idx]
@@ -597,6 +703,108 @@ class FileManager:
         if self.open and self.selected_file in (self.open[self.active_tab].children or ()):
             return self.selected_file
         return self.cursor
+
+    # --- filter box, inline rename -------------------------------------------
+    #
+    # Both share one bottom-panel text_input (`edit_mode` says which) and one
+    # key-handling path (`_handle_edit_key`): typed characters/Backspace edit
+    # `edit_text` directly (a filter also mirrors every edit into
+    # `filter_text` so the listing narrows live), Enter commits, Escape
+    # cancels. No `QuiApp` call happens here, same as every other handler path.
+
+    def _start_filter(self) -> None:
+        """`/`: open the bottom filter box, seeded with whatever query (if
+        any) is already narrowing the listing."""
+        self.edit_mode = "filter"
+        self.edit_text = self.filter_text
+
+    def _start_rename(self, node: Node) -> None:
+        """F2: open an inline rename box seeded with `node`'s current name."""
+        if node is self.root:
+            self.message = "can't rename the browser's root"
+            return
+        self.edit_mode = "rename"
+        self.rename_target = node
+        self.edit_text = node.name
+
+    def _edit_insert(self, text: str) -> None:
+        self.edit_text += text
+        if self.edit_mode == "filter":
+            self.filter_text = self.edit_text
+
+    def _edit_backspace(self) -> None:
+        self.edit_text = self.edit_text[:-1]
+        if self.edit_mode == "filter":
+            self.filter_text = self.edit_text
+
+    def _handle_edit_key(self, event: dict) -> bool:
+        """Every event while the filter/rename box is open goes through
+        here instead of the normal dispatch -- always returns True so
+        `_handle` swallows it rather than falling through to navigation.
+        A real `--tui` session never emits `CharTyped` for a plain
+        keystroke (crossterm has no such variant -- every character lands
+        as `KeyPressed{Char}`, same as this app's other single-letter
+        shortcuts), so a bare printable `Char` is treated as typed text
+        here too; `CharTyped` is still honoured for native/GTK hosts and
+        for a test pushing it directly."""
+        if "CharTyped" in event:
+            self._edit_insert(event["CharTyped"])
+            return True
+        key = _event_key(event)
+        if key == "Backspace":
+            self._edit_backspace()
+        elif key == "Enter":
+            self._commit_edit()
+        elif key == "Escape":
+            self._cancel_edit()
+        elif key is not None and len(key) == 1:
+            self._edit_insert(key)
+        # else: a non-printable named key (Up/Down/Tab/F2/...) -- ignore.
+        return True
+
+    def _commit_edit(self) -> None:
+        """Enter: a rename becomes a real rename on disk; a filter's query
+        was already live -- this just closes the box and leaves it applied."""
+        if self.edit_mode == "rename":
+            self._rename(self.rename_target, self.edit_text)
+        self.edit_mode = None
+        self.rename_target = None
+        self.edit_text = ""
+
+    def _cancel_edit(self) -> None:
+        """Escape: discard the rename (or clear the filter query) and close
+        the box."""
+        if self.edit_mode == "filter":
+            self.filter_text = ""
+        self.edit_mode = None
+        self.rename_target = None
+        self.edit_text = ""
+
+    def _rename(self, node: Node | None, new_name: str) -> None:
+        """Commit a pending rename: a real `Path.rename`, then update the
+        model in place (name, path, and every loaded descendant's path) so
+        the tree/details listing reflects it without a reload. A no-op
+        name, a name collision, or an OS failure reports a message and
+        leaves the node untouched."""
+        new_name = new_name.strip()
+        if node is None or not new_name or new_name == node.name:
+            return
+        new_path = node.path.with_name(new_name)
+        if new_path.exists():
+            self.message = f'"{new_name}" already exists'
+            return
+        try:
+            node.path.rename(new_path)
+        except OSError as exc:
+            self.message = f"rename failed: {exc}"
+            return
+        node.path = new_path
+        node.name = new_name
+        _reparent_paths(node)
+        parent = node.parent
+        if parent is not None and parent.children is not None:
+            parent.children.sort(key=_sort_key)
+        self.message = f"renamed to {new_name}"
 
     def _request_delete(self, node: Node) -> None:
         """Put up a Cancel/Delete confirm dialog for `node`."""
@@ -750,7 +958,9 @@ class FileManager:
                         "closable": True,
                         "content": {
                             "id": f"fm:grid:{i}",
-                            "data_table": details_table(folder, i),
+                            "data_table": details_table(
+                                folder, i, children=self._visible_children(folder)
+                            ),
                         },
                     }
                     for i, folder in enumerate(self.open)
@@ -772,6 +982,8 @@ class FileManager:
         ]
         if self.message:
             left.append(_segment(f" {self.message} "))
+        if self.filter_text:
+            left.append(_segment(f' filter: "{self.filter_text}" '))
         open_n = len(self.open)
         if open_n:
             right = [_segment(f" tab {self.active_tab + 1}/{open_n} ")]
@@ -784,6 +996,23 @@ class FileManager:
                 "id": "fm:status",
                 "left_segments": left,
                 "right_segments": right,
+            },
+        }
+
+    def _edit_leaf(self) -> dict:
+        """The outer split's bottom pane while the filter/rename box is
+        open: a live text_input showing its label and buffer, swapped in
+        for the status bar."""
+        label = "Filter" if self.edit_mode == "filter" else "Rename"
+        text = f"{label}: {self.edit_text}"
+        return {
+            "id": "fm:edit",
+            "text_input": {
+                "id": "fm:edit",
+                "lines": [text],
+                "cursor_line": 0,
+                "cursor_col": len(text),
+                "has_focus": True,
             },
         }
 
@@ -816,16 +1045,19 @@ class FileManager:
         # height so the bottom pane is ~one line, and `second_min` floors it at
         # one line if the real terminal is a different size. Drags on this outer
         # divider are ignored by the handler (it keys on the body split's id).
+        # The filter/rename text_input needs 3 rows (every backend borders it,
+        # even TUI), so the bottom pane grows to 3 while `edit_mode` is set.
         h = max(self.height, 2)
+        bottom_rows = min(3.0, float(h - 1)) if self.edit_mode else 1.0
         return {
             "split": {
                 "id": "fm:outer",
                 "orientation": "vertical",  # chrome+body stacked over the status bar
-                "ratio": (h - 1) / h,
+                "ratio": (h - bottom_rows) / h,
                 "first_min": 3.0,
-                "second_min": 1.0,
+                "second_min": bottom_rows,
                 "first": chrome,
-                "second": self._status_leaf(),
+                "second": self._edit_leaf() if self.edit_mode else self._status_leaf(),
             }
         }
 
@@ -837,6 +1069,9 @@ class FileManager:
             self._menu_target = None
             return
         if not isinstance(event, dict):
+            return
+
+        if self.edit_mode is not None and self._handle_edit_key(event):
             return
 
         if "MessageDialogResolved" in event:
@@ -858,6 +1093,8 @@ class FileManager:
             activation = event["DataTable"][1]
             if "RowActivated" in activation:
                 self._activate_detail(activation["RowActivated"]["idx"])
+            elif "HeaderClicked" in activation:
+                self._on_header_clicked(activation["HeaderClicked"]["col"])
         elif "Tree" in event:
             activation = event["Tree"][1]
             if "RowClicked" in activation:
@@ -895,6 +1132,10 @@ class FileManager:
             self._request_delete(self._delete_candidate())
         elif name == "Menu":
             self._request_context_menu(self._delete_candidate())
+        elif name == "/":
+            self._start_filter()
+        elif name == "F2":
+            self._start_rename(self._delete_candidate())
 
 
 # --- inspection / headless helpers -------------------------------------------
@@ -967,12 +1208,17 @@ def _wrap_quit(fm: FileManager) -> None:
     deferred-action handle and drained by those loops' own pumps, so the
     confirm dialog, context menu, toast and OS calls appear on a real
     backend exactly as they do headlessly. Only the quit keystroke needs
-    this wrapper, since a terminal has no close event to unwind on."""
+    this wrapper, since a terminal has no close event to unwind on.
+
+    Skipped entirely while the filter/rename box is open: `q` is then a
+    character to type, not a shortcut, and `Escape` cancels the box
+    instead of the whole app -- both routed to `inner` just like every
+    other key, which already knows how to tell the two states apart."""
     inner = fm._handle
 
     def handler(event) -> None:
         key = _event_key(event) if isinstance(event, dict) else None
-        if key in ("q", "Escape"):
+        if fm.edit_mode is None and key in ("q", "Escape"):
             raise _Quit
         inner(event)
 
