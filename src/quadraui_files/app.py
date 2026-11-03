@@ -879,7 +879,7 @@ def _event_key(event: dict) -> str | None:
         return _key_name(pressed.get("key"))
     for wrap in ("Tree", "List", "TabBar"):
         payload = event.get(wrap)
-        if isinstance(payload, list) and len(payload) == 2 and isinstance(payload[1], dict):
+        if isinstance(payload, (list, tuple)) and len(payload) == 2 and isinstance(payload[1], dict):
             inner = payload[1].get("KeyPressed")
             if isinstance(inner, dict):
                 return _key_name(inner.get("key"))
