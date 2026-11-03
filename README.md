@@ -26,16 +26,25 @@ from source, not pulled from PyPI), so `pytest` must run with that env active â€
 . .venv/bin/activate && pytest -q
 ```
 
-If you would rather not provision anything first, `scripts/test.sh` runs the suite from
-a bare checkout: it uses the active environment when that environment can already import
-`quadraui`, falls back to an in-tree `.venv`, and otherwise builds a virtualenv shared
-across worktrees and keyed by the pinned quadraui commit (the first build is a several
-minute Rust compile; later runs reuse it). It forwards any arguments to `pytest`.
+That command also works in a bare checkout, with nothing provisioned, because
+`.venv/bin/activate` is **tracked in git** as a bootstrap: sourcing it resolves an
+environment that can import `quadraui` + `pytest` and puts it first on `PATH`, the way a
+real activate script would. Equivalently, `scripts/test.sh` runs the suite directly and
+forwards its arguments to `pytest`:
 
 ```bash
 sh scripts/test.sh                       # whole suite, -q
 sh scripts/test.sh tests/test_actions.py # one file
 ```
+
+Both go through `scripts/bootstrap-env.sh`, which uses the active environment when it can
+already import `quadraui`, falls back to an in-tree `.venv`, and otherwise builds a
+virtualenv shared across worktrees and keyed by the pinned quadraui commit (the first
+build is a several-minute Rust compile; later runs reuse it). Provisioning a real in-tree
+virtualenv (`python3.12 -m venv .venv`, as under [Run](#run)) overwrites the bootstrap
+with the generated activate script, which is fine â€” a provisioned venv needs no
+bootstrap. `git` then reports `.venv/bin/activate` as modified until
+`git checkout .venv/bin/activate` restores it; nothing else under `.venv/` is tracked.
 
 ## Status / roadmap
 
