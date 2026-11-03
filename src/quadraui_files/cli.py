@@ -7,9 +7,41 @@ descriptor code drives every backend.
 from __future__ import annotations
 
 import sys
+from importlib import metadata
 from pathlib import Path
 
+from quadraui import QuiApp
+
 from .app import FileManager, _NATIVE_BACKEND, _Quit, _dump_steps, _run_headless, _wrap_quit
+
+_NATIVE_FEATURE = {"darwin": "macos", "win32": "win"}.get(sys.platform, "gtk")
+
+
+def _quadraui_requirement() -> str:
+    """The pinned `quadraui @ git+...` requirement this install was built
+    from, so the rebuild hint names the exact commit."""
+    try:
+        for req in metadata.requires("quadraui-files") or []:
+            if "@" in req and req.split("@", 1)[0].strip() == "quadraui":
+                return req.split(";")[0].strip()
+    except metadata.PackageNotFoundError:
+        pass
+    return "quadraui @ git+https://github.com/JDonaghy/quadraui.git@<pin>#subdirectory=quadraui-py"
+
+
+def _native_unavailable_message() -> str:
+    """`--native` on a terminal-only quadraui build: a source build of
+    quadraui-py compiles no native backend unless its Cargo feature is
+    passed to maturin, and pip's wheel cache will hand back the
+    featureless build unless it is bypassed."""
+    return (
+        "quadraui-files: --native needs quadraui built with a native backend, "
+        "but the installed build is terminal-only.\n"
+        "Rebuild it with the native feature for this platform:\n\n"
+        f'    MATURIN_PEP517_ARGS="--features {_NATIVE_FEATURE}" pip install '
+        f'--force-reinstall --no-deps --no-cache-dir "{_quadraui_requirement()}"\n\n'
+        "or run in the terminal with --tui.\n"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     if "--dump" in flags:
         _dump_steps(root.resolve())
         return 0
+
+    if "--native" in flags and "--tui" not in flags and not hasattr(QuiApp, "run_native"):
+        sys.stderr.write(_native_unavailable_message())
+        return 2
 
     fm = FileManager(root.resolve())
 
