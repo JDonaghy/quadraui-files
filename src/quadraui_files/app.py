@@ -63,9 +63,11 @@ mouse button triggered them, so a right click on a row can't be told apart
 from a left one here -- `Menu` is the keyboard stand-in.
 
 The overlay surfaces (`show_message_dialog` / `show_context_menu` /
-`show_toast` / `show_tooltip`), the platform service `send_notification`, and
-the OS actions (`open_path` / `reveal_in_file_manager` / `move_to_trash` /
-`restore_from_trash`) are never called on `QuiApp` itself from `_handle`/
+`show_toast` / `show_tooltip`), the platform service `send_notification`, the
+OS actions (`open_path` / `reveal_in_file_manager` / `move_to_trash` /
+`restore_from_trash`), and the native-chrome calls (`set_title` /
+`set_document_edited` / `set_represented_filename` / `set_cursor` -- C13, see
+that section's own doc) are never called on `QuiApp` itself from `_handle`/
 `_render`: `QuiApp` holds its one mutable borrow for the whole dispatch into
 either callback and rejects a reentrant call. They go through the
 deferred-action handle `QuiApp.actions()` returns instead -- obtained once in
@@ -86,7 +88,9 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import struct
 import sys
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -712,22 +716,95 @@ def _tooltip_payload(widget_id: str, node: Node) -> dict:
     return {"id": widget_id, "text": "\n".join(lines)}
 
 
-# --- native chrome: window title / dirty-dot / tray / cursor (not yet reachable) --
+# --- native chrome: window title / dirty-dot / tray / cursor ----------------
 #
-# C13 (window title tracking the current path, a dirty-dot during a pending
-# rename, a tray icon + menu, and a pointer-cursor swap during a divider
-# drag) needs four calls this installed quadraui-py does not expose on
-# `QuiApp` or `QuiApp.actions()`: a `WindowControl::set_title` /
-# `set_document_edited` / `set_represented_filename` binding, a `TrayService`
-# binding (icon + menu + click routing), and a `PointerCursor::set_cursor`
-# binding. `QuiApp.backend_caps()` already reports the matching capability
-# names (`"window_control"`, `"tray"`, `"pointer_cursor"` -- see
-# `tests/test_window_tray.py`) because the underlying Rust `Backend` trait
-# methods are implemented for the GTK/AppKit/Win32 backends (and, for
-# `window_control`, even the TUI one, via OSC 0/1/2), but nothing in
-# `quadraui-py`'s PyO3 surface calls into them yet. There is no reachable
-# way to wire any of C13 from this app until that binding work lands
-# upstream.
+# C13: the window title tracks the current path, a dirty-dot (and, on macOS,
+# a represented-filename proxy icon) marks a pending rename, a tray icon +
+# menu appear where the backend has one, and the pointer cursor swaps to a
+# resize glyph during a divider drag.
+#
+# Each of the four calls this needs has a different safety story on the
+# backend this app's own `self.app` always talks to (the headless
+# `TuiBackend` -- see the module doc's reentrancy note for why `run_native`
+# moving the app's descriptors/handlers onto a real GTK/AppKit/Win32 window
+# doesn't change which backend `self.app` itself queries):
+#
+#   * `set_title` -- always safe. Every backend implements `WindowControl::
+#     set_title` (the TUI one via OSC 0/2), so `_sync_window_title` calls it
+#     unconditionally on every navigation.
+#   * `set_cursor` -- always safe. `Backend::set_cursor` returns whether the
+#     glyph was actually applied rather than raising (`False`, never an
+#     error, on a backend with no native pointer concept), so a divider drag
+#     calls it unconditionally too.
+#   * `set_document_edited` / `set_represented_filename` -- only `MacBackend`
+#     overrides either; every other backend (TUI included, even running on
+#     a Mac) inherits `WindowControl`'s default `BackendError::Unsupported`,
+#     surfaced as `InternalError` -- and that error, raised while draining a
+#     handler's queued deferred action, would tear down the whole
+#     `run_tui`/`run_native` loop, not just no-op the one call. There is no
+#     `backend_caps()` name that distinguishes this (`"window_control"` is
+#     `True` on every backend, TUI included, since `set_title` does work
+#     there). So these two are gated on `self.native_window_chrome`, an
+#     opt-in flag this app never sets itself -- only `cli.py`/this module's
+#     own `__main__` block sets it, and only right before a `run_native()`
+#     call on `sys.platform == "darwin"`.
+#   * `set_tray_icon` / `set_tray_tooltip` / `set_tray_menu` -- gated on
+#     `backend_caps()["tray"]`, read once at startup. `Backend::tray`
+#     returns `None` permanently on `TuiBackend` (a terminal has no
+#     notification-area concept at all), so this is always skipped on that
+#     backend -- see `tests/test_window_tray.py`'s own caps tests, kept
+#     exactly for that reason.
+
+
+def _window_title(path: Path) -> str:
+    """`~/Documents — quadraui-files`-style window title for `path`: `~`
+    relative to the user's home directory when `path` is under it (the
+    bare home directory itself renders as `~`, not `~/`), the full path
+    otherwise."""
+    home = Path.home()
+    if path == home:
+        label = "~"
+    else:
+        try:
+            label = f"~/{path.relative_to(home)}"
+        except ValueError:
+            label = str(path)
+    return f"{label} — quadraui-files"
+
+
+def _tray_icon_png() -> bytes:
+    """A minimal valid 1x1 opaque-white PNG -- just enough bytes for
+    `set_tray_icon`'s `ImageSource` decoder to accept, built in code rather
+    than checked in as a binary asset. The real glyph a packaged app would
+    want is an OS-level concern (an `.ico`/`.icns`/themed SVG this project
+    does not ship) outside this demo's scope."""
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)  # 1x1, 8-bit RGBA
+    idat = zlib.compress(b"\x00\xff\xff\xff\xff", 9)  # filter byte + one opaque white pixel
+    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+TRAY_MENU_OPEN_HOME_ID = "fm:tray:open_home"
+TRAY_MENU_QUIT_ID = "fm:tray:quit"
+
+
+def _tray_menu_items() -> list[dict]:
+    """The tray icon's click menu: `Open home` (via `open_path`, the OS's
+    own file manager/app for it, same as this app's own context-menu
+    `Open`) and `Quit`."""
+    return [
+        {"id": TRAY_MENU_OPEN_HOME_ID, "label": _styled_text("Open home")},
+        {"id": TRAY_MENU_QUIT_ID, "label": _styled_text("Quit")},
+    ]
 
 
 # --- the live QuiApp ---------------------------------------------------------
@@ -816,6 +893,20 @@ class FileManager:
         # inside the event pump, where this app cannot catch it.
         self._undo_target: Node | None = None
         self._toast_seq = 0  # makes each toast's id unique
+        # Tray's `Quit` item (C13) can't raise `_Quit` itself -- that
+        # exception only means anything to `_wrap_quit`'s own wrapper, two
+        # call frames up from `_on_menu_item`. Set here, checked there,
+        # right after every `inner(event)` dispatch.
+        self._quit_requested = False
+        # Opt-in: only `MacBackend` implements `WindowControl::
+        # set_document_edited`/`set_represented_filename` (see this
+        # section's own "native chrome" doc, above `_window_title`) --
+        # every other backend, TUI included even on a Mac, raises
+        # `InternalError` for either, which would tear down the whole
+        # `run_tui`/`run_native` loop. `FileManager` never sets this itself;
+        # `cli.py`/this module's own `__main__` sets it to `True` only right
+        # before a `run_native()` call on `sys.platform == "darwin"`.
+        self.native_window_chrome = False
         # `_tree_capacity` needs these, but `_render` -- which calls it --
         # cannot query them live: `QuiApp`'s constructor below renders frame
         # 0 synchronously, before `self.app` itself exists to query, and
@@ -861,6 +952,30 @@ class FileManager:
                 # entry rather than letting it raise out of `__init__` and
                 # take every other, otherwise-fine, accelerator down with it.
                 pass
+        # Window title (C13): called directly on `self.app`, not through
+        # `self.actions` -- `__init__` is top-level code, same as
+        # `register_accelerator`/`set_theme` above, so it owns the one
+        # exclusive borrow outright rather than needing the deferred-action
+        # workaround a handler would. `_sync_window_title` (called from
+        # `_handle`) takes over from here, through `self.actions`, once a
+        # run loop owns the app.
+        self._window_title = _window_title(self.cursor.path)
+        self.app.set_title(self._window_title)
+        # Tray icon + menu (C13): also top-level, also gated -- `self.app`'s
+        # own backend is the headless one (`run_native` moves this app's
+        # descriptors/handlers onto a real window; it does not change what
+        # `self.app` itself queries), which never has a tray, so this is a
+        # no-op on every backend reachable from this call. Wrapped the same
+        # defensive way as `register_accelerator`, above: a backend that
+        # declares `"tray"` but rejects one of the three calls anyway
+        # should not take `__init__` down with it.
+        if self.app.backend_caps()["tray"]:
+            try:
+                self.app.set_tray_icon({"Bytes": _tray_icon_png()})
+                self.app.set_tray_tooltip("quadraui-files")
+                self.app.set_tray_menu(_tray_menu_items())
+            except QuadrauiError:
+                pass
 
     def _apply_system_theme(self) -> None:
         """OS theme match (C14): read the OS's light/dark preference once at
@@ -880,6 +995,24 @@ class FileManager:
         self._status_fg = _STATUS_DARK_FG if dark else _STATUS_LIGHT_FG
         self._status_bg = _STATUS_DARK_BG if dark else _STATUS_LIGHT_BG
         self._status_accent = _STATUS_DARK_ACCENT if dark else _STATUS_LIGHT_ACCENT
+
+    def _sync_window_title(self) -> None:
+        """Window title (C13), called from `_handle` after every event:
+        if the cursored folder changed since the last call, queues a
+        `set_title` -- unconditionally, `set_title` is safe on every
+        backend -- and, where `native_window_chrome` says it's safe (see
+        that attribute's own doc), a `set_represented_filename` for the
+        same folder. A plain equality check against the cached title
+        rather than tracking `self.cursor` itself, so this fires exactly
+        when the *displayed* title would actually change (not, e.g., on
+        every keystroke that leaves the cursor on the same node)."""
+        title = _window_title(self.cursor.path)
+        if title == self._window_title:
+            return
+        self._window_title = title
+        self.actions.set_title(title)
+        if self.native_window_chrome:
+            self.actions.set_represented_filename(str(self.cursor.path))
 
     # --- navigation helpers --------------------------------------------------
 
@@ -1143,13 +1276,18 @@ class FileManager:
         self.edit_text = self.filter_text
 
     def _start_rename(self, node: Node) -> None:
-        """F2: open an inline rename box seeded with `node`'s current name."""
+        """F2: open an inline rename box seeded with `node`'s current name,
+        and mark the window dirty (C13) where that's safe (see
+        `native_window_chrome`'s own doc) -- cleared again by
+        `_commit_edit`/`_cancel_edit`."""
         if node is self.root:
             self.message = "can't rename the browser's root"
             return
         self.edit_mode = "rename"
         self.rename_target = node
         self.edit_text = node.name
+        if self.native_window_chrome:
+            self.actions.set_document_edited(True)
 
     def _edit_insert(self, text: str) -> None:
         self.edit_text += text
@@ -1197,21 +1335,30 @@ class FileManager:
 
     def _commit_edit(self) -> None:
         """Enter: a rename becomes a real rename on disk; a filter's query
-        was already live -- this just closes the box and leaves it applied."""
-        if self.edit_mode == "rename":
+        was already live -- this just closes the box and leaves it applied.
+        Clears the dirty-dot (C13) a pending rename set, same gate as
+        `_start_rename`."""
+        was_renaming = self.edit_mode == "rename"
+        if was_renaming:
             self._rename(self.rename_target, self.edit_text)
         self.edit_mode = None
         self.rename_target = None
         self.edit_text = ""
+        if was_renaming and self.native_window_chrome:
+            self.actions.set_document_edited(False)
 
     def _cancel_edit(self) -> None:
         """Escape: discard the rename (or clear the filter query) and close
-        the box."""
+        the box. Same dirty-dot clear as `_commit_edit` when the box being
+        cancelled was a rename, not a filter."""
+        was_renaming = self.edit_mode == "rename"
         if self.edit_mode == "filter":
             self.filter_text = ""
         self.edit_mode = None
         self.rename_target = None
         self.edit_text = ""
+        if was_renaming and self.native_window_chrome:
+            self.actions.set_document_edited(False)
 
     def _rename(self, node: Node | None, new_name: str) -> None:
         """Commit a pending rename: a real `Path.rename`, then update the
@@ -1291,8 +1438,18 @@ class FileManager:
         )
 
     def _on_menu_item(self, item_id: str) -> None:
-        """A context-menu item was chosen: run the matching action on
-        `self._menu_target` (set when the menu was requested)."""
+        """A `ContextMenuItemActivated` event: a tray-menu item (C13) fires
+        through the same event type a right-click context menu's item
+        does (see `_tray_menu_items`'s own doc), so those two ids are
+        checked first, independent of `self._menu_target`. Otherwise,
+        run the matching action on `self._menu_target` (set when the
+        context menu was requested)."""
+        if item_id == TRAY_MENU_OPEN_HOME_ID:
+            self.actions.open_path(str(Path.home()))
+            return
+        if item_id == TRAY_MENU_QUIT_ID:
+            self._quit_requested = True
+            return
         node = self._menu_target
         self._menu_target = None
         if node is None:
@@ -1547,6 +1704,15 @@ class FileManager:
         }
 
     def _handle(self, event) -> None:
+        """Per-event entry point: `_dispatch` does the real work, then this
+        syncs the window title (C13) against wherever the cursor landed --
+        after every event, not just a navigation one, so it still catches
+        a `TabClosed`/`_forget` pulling the cursor back onto a different
+        node with no dedicated "move" call of its own."""
+        self._dispatch(event)
+        self._sync_window_title()
+
+    def _dispatch(self, event) -> None:
         """Per-event: move the cursor, expand/collapse, open/close tabs, drill
         into folders, resize, queue a file action. Mutates state only; never
         calls into `QuiApp` -- see the module doc's reentrant-borrow note."""
@@ -1614,6 +1780,16 @@ class FileManager:
                 self.ratio = drag["new_ratio"]
             elif tree == "fm:detail_split":
                 self.preview_ratio = drag["new_ratio"]
+            if tree in ("fm:split", "fm:detail_split"):
+                # Pointer cursor (C13): both dividers are vertical (panes
+                # side by side -- see `_render`'s own comment), so
+                # `"col_resize"` rather than the compass-edge `"resize"`
+                # shape. Always safe to call: `set_cursor` answers whether
+                # the glyph was actually applied rather than raising (see
+                # this section's own "native chrome" doc), `False` rather
+                # than an error on a backend -- the TUI one included --
+                # with no native pointer concept at all.
+                self.actions.set_cursor("col_resize")
 
     def _on_key(self, name: str) -> None:
         self.message = ""
@@ -1741,7 +1917,13 @@ def _wrap_quit(fm: FileManager) -> None:
     Skipped entirely while the filter/rename box is open: `q` is then a
     character to type, not a shortcut, and `Escape` cancels the box
     instead of the whole app -- both routed to `inner` just like every
-    other key, which already knows how to tell the two states apart."""
+    other key, which already knows how to tell the two states apart.
+
+    Also the only place the tray's `Quit` item (C13) can end a real run
+    loop: `_on_menu_item` can't raise `_Quit` itself (it has no idea this
+    wrapper exists), so it just sets `fm._quit_requested` and this checks
+    that flag right after every dispatch, same as it checks the plain
+    keystroke above."""
     inner = fm._handle
 
     def handler(event) -> None:
@@ -1749,6 +1931,8 @@ def _wrap_quit(fm: FileManager) -> None:
         if fm.edit_mode is None and key in ("q", "Escape"):
             raise _Quit
         inner(event)
+        if fm._quit_requested:
+            raise _Quit
 
     fm.app.set_handler(handler)
 
@@ -1803,8 +1987,12 @@ if __name__ == "__main__":
             pass
     elif "--native" in flags:
         _wrap_quit(fm)  # OS window: GTK / AppKit / Win32 per the built feature
+        # Only safe to flip right here, right before the one call that
+        # actually opens a real macOS window -- see `native_window_chrome`'s
+        # own doc for why a TUI session on a Mac must never set this.
+        fm.native_window_chrome = sys.platform == "darwin"
         try:
-            fm.app.run_native(title="quadraui file manager")
+            fm.app.run_native(title=fm._window_title)
         except _Quit:
             pass
     else:

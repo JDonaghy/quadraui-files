@@ -32,8 +32,13 @@ def main(argv: list[str] | None = None) -> int:
             pass
     elif "--native" in flags:
         _wrap_quit(fm)  # OS window: AppKit / GTK / Win32 per the built feature
+        # Only safe to flip right here, right before the one call that
+        # actually opens a real macOS window -- see `FileManager.
+        # native_window_chrome`'s own doc for why a TUI session on a Mac
+        # must never set this.
+        fm.native_window_chrome = sys.platform == "darwin"
         try:
-            fm.app.run_native(title="quadraui file manager")
+            fm.app.run_native(title=fm._window_title)
         except _Quit:
             pass
     else:
