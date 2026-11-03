@@ -53,7 +53,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T0** | Folder tree + file-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
 | **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ all backends ([known limits](#known-limits)) |
 | **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
-| **Preview** | Read-only preview pane for the selected file | planned |
+| **Preview** | Read-only preview pane for the selected file | ✅ all backends |
 | **T3** | OS-theme match, keybindings, tooltips, notifications | planned |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | planned |
 
@@ -95,6 +95,11 @@ header shows a `▲`/`▼` marker. A rename is rejected (with a status-bar messa
 crash) if the typed name contains a path separator or starts with `.`: this app's model
 never lists dotfiles, so renaming onto one would just make the entry vanish on the next
 refresh.
+
+Activating a file row (click or Enter) also loads it into the **preview pane**, a third
+region to the right of the details table behind its own resizable divider: text content
+renders read-only, pinned to the file's head; binary or unreadable files show a short
+`N bytes · <type>` placeholder instead.
 
 ## quadraui dependency
 

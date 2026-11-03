@@ -429,14 +429,13 @@ def details_table(
 # it does not fit this app's "backend lays out, app only describes" model yet.
 # `text_display` is the documented fallback for exactly that gap.
 #
-# `text_display` always paints the *tail* of whatever `lines` it is given --
-# there is no scroll/cursor field in its descriptor that pins it to the top,
-# a gap of its own worth noting (it reads as built for a log/console tail,
-# not a document viewer). A preview wants the *head* of the file, so instead
-# of fighting that, the line count handed to it is capped at how many rows
-# the pane actually paints (`capacity`): once `len(lines) <= capacity` there
-# is nothing to scroll, so "painted tail" and "painted head" are the same
-# rows and the file's start is exactly what shows.
+# `text_display` defaults to auto-scrolling to the tail of `lines` (built for
+# a log/console tail, not a document viewer), but its descriptor also carries
+# `scroll_offset` and `auto_scroll` fields -- `auto_scroll: False` plus
+# `scroll_offset: 0` pins it to row 0 instead, which is what a preview wants.
+# `preview_leaf` sets both explicitly. The `capacity` cap on top of that is
+# no longer what keeps the head on screen; it just bounds how much of an
+# arbitrarily large file ever gets read and painted.
 
 PREVIEW_MAX_BYTES = 64 * 1024  # read at most this many bytes before truncating
 
@@ -454,47 +453,88 @@ def _looks_binary(sample: bytes) -> bool:
     return False
 
 
+def _trim_incomplete_utf8_tail(data: bytes) -> bytes:
+    """Drop a trailing partial UTF-8 multi-byte sequence, if one is there.
+    A hard byte cutoff (like `PREVIEW_MAX_BYTES`) can slice through the
+    middle of a multi-byte character; left alone, that dangling fragment
+    makes an otherwise-valid text sample decode as invalid (or, worse, read
+    as binary). Looks back at most 4 bytes -- the longest a UTF-8 sequence
+    gets -- for a lead byte whose sequence runs past the end of `data`."""
+    limit = min(4, len(data))
+    for i in range(1, limit + 1):
+        byte = data[-i]
+        if byte & 0xC0 == 0x80:
+            continue  # a continuation byte; keep walking back
+        if byte & 0xE0 == 0xC0:
+            seq_len = 2
+        elif byte & 0xF0 == 0xE0:
+            seq_len = 3
+        elif byte & 0xF8 == 0xF0:
+            seq_len = 4
+        else:
+            return data  # an ASCII byte (or an invalid lead byte): nothing to trim
+        return data[:-i] if seq_len > i else data
+    return data
+
+
 def preview_lines(node: Node | None, *, capacity: int) -> list[dict]:
-    """Styled-text lines for the preview pane: no selection and a directory
-    both get a short hint; a binary/undecodable file gets a one-line
+    """Styled-text lines for the preview pane: no selection, a directory, or
+    a non-regular file (pipe/socket/device -- opening one of those can block
+    or hang) all get a short hint; a binary/undecodable file gets a one-line
     "N bytes · <type>" placeholder; a text file gets its content, truncated
-    (by bytes read, and again to `capacity` lines -- see the module note
-    above on why that also keeps it un-scrolled to the file's head) so an
-    arbitrarily large file never has to be painted in full. `capacity` is
-    always at least 1, so there is room for a lone truncation marker even
-    against a one-row pane."""
+    (by bytes read, and again to `capacity` lines) so an arbitrarily large
+    file never has to be painted in full. `capacity` is always at least 1,
+    so there is room for a lone truncation marker even against a one-row
+    pane."""
     if node is None:
         return [_styled_text("No file selected.")]
     if node.is_dir:
         return [_styled_text("Select a file to preview it.")]
+    if not node.path.is_file():
+        return [_styled_text("Not a regular file.")]
     capacity = max(1, capacity)
     try:
         with node.path.open("rb") as f:
             data = f.read(PREVIEW_MAX_BYTES + 1)
-    except OSError:
+    except FileNotFoundError:
         return [_styled_text(f"{node.name} is no longer there")]
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        return [_styled_text(f"{node.name} can't be read ({reason})")]
     byte_truncated = len(data) > PREVIEW_MAX_BYTES
     if byte_truncated:
-        data = data[:PREVIEW_MAX_BYTES]
+        data = _trim_incomplete_utf8_tail(data[:PREVIEW_MAX_BYTES])
     if _looks_binary(data):
         kind, _encoding = mimetypes.guess_type(node.name)
         size = _human_size(node.size_bytes if node.size_bytes is not None else len(data))
         return [_styled_text(f"{size} · {kind or 'binary'}")]
     lines = data.decode("utf-8", errors="replace").splitlines() or [""]
     line_truncated = len(lines) > capacity
-    shown = capacity - 1 if (byte_truncated or line_truncated) else capacity
+    needs_marker = byte_truncated or line_truncated
+    # Only steal a content row for the truncation marker when there isn't
+    # already a free one below the last line -- otherwise `capacity` rows
+    # of a file that just barely overflowed its byte cap would lose a line
+    # it didn't need to.
+    shown = capacity - 1 if (needs_marker and len(lines) >= capacity) else min(capacity, len(lines))
     rows = [_styled_text(line) for line in lines[:shown]]
-    if byte_truncated or line_truncated:
+    if needs_marker:
         rows.append(_styled_text("… (truncated)"))
     return rows
 
 
 def preview_leaf(node: Node | None, *, capacity: int) -> dict:
     """The layout-tree leaf for the preview pane: a read-only `text_display`
-    of `preview_lines(node, capacity=capacity)`."""
+    of `preview_lines(node, capacity=capacity)`, pinned to the head of the
+    file (`auto_scroll: False`, `scroll_offset: 0`) rather than its default
+    tail-follow behavior."""
     return {
         "id": "fm:preview",
-        "text_display": {"id": "fm:preview", "lines": preview_lines(node, capacity=capacity)},
+        "text_display": {
+            "id": "fm:preview",
+            "lines": preview_lines(node, capacity=capacity),
+            "auto_scroll": False,
+            "scroll_offset": 0,
+        },
     }
 
 
@@ -636,6 +676,10 @@ class FileManager:
         self._line_height = 1.0
         self._chrome_line_height = 1.0
         self._viewport_height = float(height)
+        # The preview pane's layout-tree leaf, cached from `self.selected_file`
+        # by `_set_selected_file` -- see that method for why `_render` only
+        # reads this instead of reading+decoding the file itself every frame.
+        self._preview_leaf = preview_leaf(self.selected_file, capacity=self._tree_capacity())
         self.app = QuiApp(width, height, render=self._render)
         # Obtained here, from top-level code: `actions()` is the only way the
         # handler can reach an overlay/OS call, and it is unreachable once a
@@ -645,6 +689,7 @@ class FileManager:
         self._line_height = self.app.line_height()
         self._chrome_line_height = self.app.chrome_line_height()
         self._viewport_height = self.app.viewport()[1]
+        self._refresh_preview()  # frame 0 ran with the placeholder capacity above
 
     # --- navigation helpers --------------------------------------------------
 
@@ -678,6 +723,21 @@ class FileManager:
         capacity too -- `_render` reuses it as the preview's line cap."""
         chrome_rows = 3 * self._chrome_line_height / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows))
+
+    def _refresh_preview(self) -> None:
+        """Rebuild the cached preview-pane leaf from `self.selected_file`.
+        Reading, decoding and line-splitting a file is I/O, and every other
+        piece of state `_render` reads is computed here in the handler, not
+        inside the render callback itself (the native backends in particular
+        repaint far more often than the TUI) -- so this runs once, whenever
+        the selection changes, rather than every frame."""
+        self._preview_leaf = preview_leaf(self.selected_file, capacity=self._tree_capacity())
+
+    def _set_selected_file(self, node: Node | None) -> None:
+        """The one place `selected_file` is assigned, so the cached preview
+        leaf above never goes stale."""
+        self.selected_file = node
+        self._refresh_preview()
 
     def _scroll_to_cursor(self, cursor_index: int, row_count: int) -> None:
         """Advance `scroll` so the cursor row stays within the painted window,
@@ -813,7 +873,7 @@ class FileManager:
             self.cursor = child
             self._open(child)
         else:
-            self.selected_file = child
+            self._set_selected_file(child)
             self.message = f"opening {child.name} ({_human_size(child.size_bytes)})"
             self._open_with_os(child)
 
@@ -1075,7 +1135,7 @@ class FileManager:
         if self.cursor is node:
             self.cursor = parent or self.root
         if self.selected_file is node:
-            self.selected_file = None
+            self._set_selected_file(None)
 
     def _remember(self, node: Node) -> None:
         """Put `node` back into the model after a restore, in display order.
@@ -1202,7 +1262,7 @@ class FileManager:
                 "orientation": "horizontal",  # details beside its preview, vertical divider
                 "ratio": self.preview_ratio,
                 "first": self._details_pane(),
-                "second": preview_leaf(self.selected_file, capacity=self._tree_capacity()),
+                "second": self._preview_leaf,
             }
         }
         body = {
