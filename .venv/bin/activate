@@ -1,0 +1,78 @@
+# shellcheck shell=sh
+# quadraui-files environment bootstrap -- a sourceable stand-in for a generated
+# virtualenv, tracked in git on purpose.
+#
+# `quadraui` is compiled from source, so it only ever lives inside a virtualenv:
+# a freshly checked-out clone or git worktree has no environment at all, and the
+# documented entry point
+#
+#     . .venv/bin/activate && pytest -q
+#
+# would otherwise die on the `.` itself ("cannot open .venv/bin/activate"),
+# before pytest ever ran. Shipping this file at that exact path makes the entry
+# point self-provisioning: sourcing it resolves -- building once per pinned quadraui
+# commit if needed, see scripts/bootstrap-env.sh -- an environment that can
+# import `quadraui` and `pytest`, then puts that environment first on PATH the
+# way a real activate script would.
+#
+# Provisioning an in-tree virtualenv (`python3.12 -m venv .venv`) overwrites
+# this file with the real activate script, which is fine: a provisioned venv
+# needs no bootstrap, and git then reports the file as modified until
+# `git checkout .venv/bin/activate` restores it.
+#
+# Must stay POSIX `sh`-sourceable (the runners use /bin/sh) and must not enable
+# shell options or exit, since it runs in the caller's shell.
+
+# The repo root. Sourced as `. .venv/bin/activate` from there, so $PWD is it;
+# QUADRAUI_FILES_ROOT overrides that for anyone sourcing from elsewhere.
+if [ -n "${QUADRAUI_FILES_ROOT-}" ]; then
+    _quadraui_files_root=$QUADRAUI_FILES_ROOT
+else
+    _quadraui_files_root=$PWD
+fi
+
+if [ ! -f "$_quadraui_files_root/scripts/bootstrap-env.sh" ]; then
+    echo "activate: cannot find the quadraui-files checkout containing this" \
+         "script; source it from the repo root, or set QUADRAUI_FILES_ROOT" >&2
+    unset _quadraui_files_root
+    return 1 2>/dev/null || exit 1
+fi
+
+_quadraui_files_python=$(sh "$_quadraui_files_root/scripts/bootstrap-env.sh")
+if [ -z "$_quadraui_files_python" ] || [ ! -x "$_quadraui_files_python" ]; then
+    echo "activate: scripts/bootstrap-env.sh did not produce a usable" \
+         "interpreter -- see its output above" >&2
+    unset _quadraui_files_root _quadraui_files_python
+    return 1 2>/dev/null || exit 1
+fi
+
+_quadraui_files_bin=$(dirname "$_quadraui_files_python")
+
+# Keep one saved PATH per activation so repeated sourcing stays idempotent.
+if [ -z "${_QUADRAUI_FILES_OLD_PATH-}" ]; then
+    _QUADRAUI_FILES_OLD_PATH=$PATH
+    export _QUADRAUI_FILES_OLD_PATH
+fi
+PATH="$_quadraui_files_bin:$PATH"
+export PATH
+
+# Only a genuine virtualenv gets announced as one; an ambient interpreter that
+# already had the dependencies (a developer's live venv, CI after `pip install
+# -e ".[dev]"`) is left to describe itself.
+if [ -f "$(dirname "$_quadraui_files_bin")/pyvenv.cfg" ]; then
+    VIRTUAL_ENV=$(dirname "$_quadraui_files_bin")
+    export VIRTUAL_ENV
+    unset PYTHONHOME
+fi
+
+deactivate() {
+    if [ -n "${_QUADRAUI_FILES_OLD_PATH-}" ]; then
+        PATH=$_QUADRAUI_FILES_OLD_PATH
+        export PATH
+        unset _QUADRAUI_FILES_OLD_PATH
+    fi
+    unset VIRTUAL_ENV
+    unset -f deactivate 2>/dev/null || true
+}
+
+unset _quadraui_files_root _quadraui_files_python _quadraui_files_bin
