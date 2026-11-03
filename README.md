@@ -26,6 +26,17 @@ from source, not pulled from PyPI), so `pytest` must run with that env active â€
 . .venv/bin/activate && pytest -q
 ```
 
+If you would rather not provision anything first, `scripts/test.sh` runs the suite from
+a bare checkout: it uses the active environment when that environment can already import
+`quadraui`, falls back to an in-tree `.venv`, and otherwise builds a virtualenv shared
+across worktrees and keyed by the pinned quadraui commit (the first build is a several
+minute Rust compile; later runs reuse it). It forwards any arguments to `pytest`.
+
+```bash
+sh scripts/test.sh                       # whole suite, -q
+sh scripts/test.sh tests/test_actions.py # one file
+```
+
 ## Status / roadmap
 
 | Tranche | Scope | State |
@@ -41,8 +52,8 @@ from source, not pulled from PyPI), so `pytest` must run with that env active â€
 
 Every behavior-changing PR ships a **black-box test** that drives the running app
 (headless TUI backend) and asserts on its rendered `screen()` â€” see `tests/`. That
-suite is the CI oracle. Native-backend behavior (the window/tray and native file ops)
-is verified manually.
+suite is the CI oracle, and `scripts/test.sh` is the entry point CI runs. Native-backend
+behavior (the window/tray and native file ops) is verified manually.
 
 ## Known limits
 
