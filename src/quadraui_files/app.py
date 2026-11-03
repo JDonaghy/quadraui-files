@@ -9,9 +9,15 @@ Layout (the `render` callback returns a *layout tree*):
     │            ├─ toolbar : a key-legend affordance strip (reserved top slot)
     │            └─ content : split (resizable divider, draggable)
     │                          ├─ first  : a FOLDERS-ONLY tree (navigation)
-    │                          └─ second : the details area -- tabs, one per
-    │                                      opened folder, each tab a data_table
-    │                                      of that folder's contents
+    │                          └─ second : split (resizable divider, draggable)
+    │                                      ├─ first  : the details area --
+    │                                      │           tabs, one per opened
+    │                                      │           folder, each tab a
+    │                                      │           data_table of that
+    │                                      │           folder's contents
+    │                                      └─ second : a read-only preview of
+    │                                                  the last file selected
+    │                                                  in a details table
     └─ second : a live status bar (cursored folder, item count, open tabs)
 
 The tree loads lazily: only one directory level is read at a time, so you can
@@ -77,6 +83,7 @@ needing to run between events.
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import sys
 from dataclasses import dataclass, field
@@ -410,6 +417,87 @@ def details_table(
     return {"id": table_id, "columns": columns, "rows": rows}
 
 
+# --- selected file -> read-only preview --------------------------------------
+#
+# A third region, to the right of the details tabs: a read-only preview of
+# whichever file was last selected (activated) in a details table. Built with
+# `text_display`, the same read-only line-list primitive the empty-details
+# placeholder already uses -- the installed quadraui's `editor` primitive
+# wants a caller-measured pixel `rect` and a long list of editor-only fields
+# (gutter, diagnostics, git-status markers) rather than slotting into a split
+# leaf sized by the layout tree the way every other primitive here does, so
+# it does not fit this app's "backend lays out, app only describes" model yet.
+# `text_display` is the documented fallback for exactly that gap.
+#
+# `text_display` always paints the *tail* of whatever `lines` it is given --
+# there is no scroll/cursor field in its descriptor that pins it to the top,
+# a gap of its own worth noting (it reads as built for a log/console tail,
+# not a document viewer). A preview wants the *head* of the file, so instead
+# of fighting that, the line count handed to it is capped at how many rows
+# the pane actually paints (`capacity`): once `len(lines) <= capacity` there
+# is nothing to scroll, so "painted tail" and "painted head" are the same
+# rows and the file's start is exactly what shows.
+
+PREVIEW_MAX_BYTES = 64 * 1024  # read at most this many bytes before truncating
+
+
+def _looks_binary(sample: bytes) -> bool:
+    """A NUL byte or invalid UTF-8 anywhere in `sample` marks it binary --
+    the same quick heuristic common file-preview tools use rather than a
+    full content-type sniff."""
+    if b"\x00" in sample:
+        return True
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def preview_lines(node: Node | None, *, capacity: int) -> list[dict]:
+    """Styled-text lines for the preview pane: no selection and a directory
+    both get a short hint; a binary/undecodable file gets a one-line
+    "N bytes · <type>" placeholder; a text file gets its content, truncated
+    (by bytes read, and again to `capacity` lines -- see the module note
+    above on why that also keeps it un-scrolled to the file's head) so an
+    arbitrarily large file never has to be painted in full. `capacity` is
+    always at least 1, so there is room for a lone truncation marker even
+    against a one-row pane."""
+    if node is None:
+        return [_styled_text("No file selected.")]
+    if node.is_dir:
+        return [_styled_text("Select a file to preview it.")]
+    capacity = max(1, capacity)
+    try:
+        with node.path.open("rb") as f:
+            data = f.read(PREVIEW_MAX_BYTES + 1)
+    except OSError:
+        return [_styled_text(f"{node.name} is no longer there")]
+    byte_truncated = len(data) > PREVIEW_MAX_BYTES
+    if byte_truncated:
+        data = data[:PREVIEW_MAX_BYTES]
+    if _looks_binary(data):
+        kind, _encoding = mimetypes.guess_type(node.name)
+        size = _human_size(node.size_bytes if node.size_bytes is not None else len(data))
+        return [_styled_text(f"{size} · {kind or 'binary'}")]
+    lines = data.decode("utf-8", errors="replace").splitlines() or [""]
+    line_truncated = len(lines) > capacity
+    shown = capacity - 1 if (byte_truncated or line_truncated) else capacity
+    rows = [_styled_text(line) for line in lines[:shown]]
+    if byte_truncated or line_truncated:
+        rows.append(_styled_text("… (truncated)"))
+    return rows
+
+
+def preview_leaf(node: Node | None, *, capacity: int) -> dict:
+    """The layout-tree leaf for the preview pane: a read-only `text_display`
+    of `preview_lines(node, capacity=capacity)`."""
+    return {
+        "id": "fm:preview",
+        "text_display": {"id": "fm:preview", "lines": preview_lines(node, capacity=capacity)},
+    }
+
+
 # --- chrome: toolbar band + status bar ---------------------------------------
 #
 # The toolbar is the body's chrome, carried by a `sidebar_panel` wrapper whose
@@ -514,6 +602,7 @@ class FileManager:
         self.cursor: Node = self.root   # the selected folder node
         self.scroll = 0                 # index of the first painted tree row
         self.ratio = 0.3                # tree pane width fraction
+        self.preview_ratio = 0.65       # details-vs-preview width fraction, within the body's second pane
         self.open: list[Node] = []      # folder nodes shown as tabs, in order
         self.active_tab = 0             # index into self.open
         self.message = ""               # transient status hint
@@ -576,13 +665,17 @@ class FileManager:
         self.cursor = nodes[max(0, min(len(nodes) - 1, i + delta))]
 
     def _tree_capacity(self) -> int:
-        """Painted tree rows that fit: the app's measured viewport height
-        less the three chrome rows above/below the tree -- the toolbar row,
-        the outer split's divider, and the bottom status line -- each
-        `chrome_line_height` tall, converted into tree-row units via
+        """Painted rows that fit in the body's row band: the app's measured
+        viewport height less the three chrome rows above/below it -- the
+        toolbar row, the outer split's divider, and the bottom status line
+        -- each `chrome_line_height` tall, converted into row units via
         `line_height`. Reads the cached metrics `__init__` measured from
         `self.app` itself (`viewport`/`line_height`/`chrome_line_height`)
-        rather than guessing from the constructor's `height` argument."""
+        rather than guessing from the constructor's `height` argument.
+        Named for the tree, its first caller, but the details and preview
+        panes sit in that same vertical band (the nested detail/preview
+        split is side-by-side, not stacked) so this doubles as their row
+        capacity too -- `_render` reuses it as the preview's line cap."""
         chrome_rows = 3 * self._chrome_line_height / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows))
 
@@ -1095,19 +1188,30 @@ class FileManager:
     def _render(self) -> dict:
         """Per-frame: rebuild the whole frame from state. An outer vertical split
         stacks the chrome+body (top) over a one-line status bar (bottom); the
-        body is the resizable tree/details split, wrapped in a `sidebar_panel`
-        whose reserved slot paints the toolbar above it. Reads only."""
+        body is the resizable tree/(details|preview) split, wrapped in a
+        `sidebar_panel` whose reserved slot paints the toolbar above it. The
+        details and preview panes are themselves a nested resizable split, so
+        the frame is sidebar | details | preview overall. Reads only."""
         rows, nodes = self._visible()
         cursor_index = nodes.index(self.cursor)
         selected_path = rows[cursor_index]["path"]
         self._scroll_to_cursor(cursor_index, len(rows))
+        details_and_preview = {
+            "split": {
+                "id": "fm:detail_split",
+                "orientation": "horizontal",  # details beside its preview, vertical divider
+                "ratio": self.preview_ratio,
+                "first": self._details_pane(),
+                "second": preview_leaf(self.selected_file, capacity=self._tree_capacity()),
+            }
+        }
         body = {
             "split": {
                 "id": "fm:split",
                 "orientation": "horizontal",  # panes side by side, vertical divider
                 "ratio": self.ratio,
                 "first": tree_leaf(rows, selected_path=selected_path, scroll_offset=self.scroll),
-                "second": self._details_pane(),
+                "second": details_and_preview,
             }
         }
         chrome = {
@@ -1190,10 +1294,14 @@ class FileManager:
                 self._close_tab(activation["TabClosed"]["index"])
         elif "SplitDividerDragged" in event:
             drag = event["SplitDividerDragged"]
-            # Only the body split is user-resizable; the outer chrome/status
-            # split is fixed, so ignore drags that aren't the body's.
-            if drag.get("tree") == "fm:split":
+            # Only the two body splits are user-resizable; the outer
+            # chrome/status split is fixed, so ignore drags that aren't one
+            # of theirs.
+            tree = drag.get("tree")
+            if tree == "fm:split":
                 self.ratio = drag["new_ratio"]
+            elif tree == "fm:detail_split":
+                self.preview_ratio = drag["new_ratio"]
 
     def _on_key(self, name: str) -> None:
         self.message = ""
