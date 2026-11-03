@@ -63,17 +63,18 @@ mouse button triggered them, so a right click on a row can't be told apart
 from a left one here -- `Menu` is the keyboard stand-in.
 
 The overlay surfaces (`show_message_dialog` / `show_context_menu` /
-`show_toast`) and the OS actions (`open_path` / `reveal_in_file_manager` /
-`move_to_trash` / `restore_from_trash`) are never called on `QuiApp` itself
-from `_handle`/`_render`: `QuiApp` holds its one mutable borrow for the whole
-dispatch into either callback and rejects a reentrant call. They go through the
+`show_toast` / `show_tooltip`), the platform service `send_notification`, and
+the OS actions (`open_path` / `reveal_in_file_manager` / `move_to_trash` /
+`restore_from_trash`) are never called on `QuiApp` itself from `_handle`/
+`_render`: `QuiApp` holds its one mutable borrow for the whole dispatch into
+either callback and rejects a reentrant call. They go through the
 deferred-action handle `QuiApp.actions()` returns instead -- obtained once in
 `__init__`, before any run loop starts, and called straight from the handler,
 which validates the arguments on the spot and queues the action. Every event
 pump -- `QuiApp.step`, `run_tui`'s loop, and `run_native`'s GTK/AppKit/Win32
 loops -- drains that queue right after the dispatch that filled it, so the
-dialog, menu, toast or OS call lands on every backend without any Python code
-needing to run between events.
+dialog, menu, toast, tooltip, notification or OS call lands on every backend
+without any Python code needing to run between events.
 
     python quadraui-py/examples/file_manager.py [PATH]            # headless demo
     python quadraui-py/examples/file_manager.py [PATH] --tui      # real terminal
@@ -90,7 +91,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from quadraui import InternalError, QuiApp
+from quadraui import InternalError, QuadrauiError, QuiApp
 
 # Can a trashed path be put back? `restore_from_trash` is implemented for the
 # freedesktop.org trash spec (Linux/BSD) and the Windows recycle bin, and
@@ -564,21 +565,20 @@ TOOLBAR = {
 }
 
 # `StatusBarSegment` requires explicit fg + bg (unlike the theme-driven
-# `StyledText` spans elsewhere); the accent foreground highlights the cursored
-# folder's name.
-_STATUS_FG = {"r": 220, "g": 220, "b": 230, "a": 255}
-_STATUS_BG = {"r": 30, "g": 32, "b": 48, "a": 255}
-_STATUS_ACCENT = {"r": 245, "g": 224, "b": 138, "a": 255}
+# `StyledText` spans elsewhere, `set_theme` never touches it) -- so the status
+# bar needs its own light/dark pair, picked by `_apply_system_theme` from the
+# same `system_theme()` read that chooses between `_VSCODE_DARK_THEME` and
+# `_VSCODE_LIGHT_THEME`, stored on the instance (`self._status_fg`/`_bg`/
+# `_accent`) rather than as one fixed module-level triple -- otherwise the
+# band stayed dark navy regardless of the OS's light/dark preference. The
+# accent foreground highlights the cursored folder's name.
+_STATUS_DARK_FG = {"r": 220, "g": 220, "b": 230, "a": 255}
+_STATUS_DARK_BG = {"r": 30, "g": 32, "b": 48, "a": 255}
+_STATUS_DARK_ACCENT = {"r": 245, "g": 224, "b": 138, "a": 255}
 
-
-def _segment(text: str, *, accent: bool = False, bold: bool = False) -> dict:
-    """One `StatusBarSegment`: styled text with explicit colors."""
-    return {
-        "text": text,
-        "fg": _STATUS_ACCENT if accent else _STATUS_FG,
-        "bg": _STATUS_BG,
-        "bold": bold,
-    }
+_STATUS_LIGHT_FG = {"r": 40, "g": 40, "b": 40, "a": 255}
+_STATUS_LIGHT_BG = {"r": 225, "g": 225, "b": 225, "a": 255}
+_STATUS_LIGHT_ACCENT = {"r": 0, "g": 95, "b": 184, "a": 255}
 
 
 # --- chrome: OS theme + global keybindings -----------------------------------
@@ -597,8 +597,11 @@ def _segment(text: str, *, accent: bool = False, bold: bool = False) -> dict:
 
 # A VS Code-like palette, as a `set_theme` override merged onto whichever
 # backend's own default theme -- only the handful of `Theme` fields this app's
-# own chrome (tree, details grid, tabs, status bar) actually paints need a
-# value here; every other field keeps the installed theme's own default.
+# own chrome (tree, details grid, tabs) actually paints need a value here;
+# every other field keeps the installed theme's own default. The status bar
+# is NOT painted from this palette -- `StatusBarSegment` takes its own
+# explicit fg/bg, so it is picked separately in `_apply_system_theme` from
+# the `_STATUS_DARK_*`/`_STATUS_LIGHT_*` pair, right below.
 _VSCODE_DARK_THEME = {
     "background": "#1e1e1e",
     "foreground": "#d4d4d4",
@@ -669,6 +672,46 @@ ACCELERATORS = [
 ]
 
 
+# --- chrome: hover tooltips ---------------------------------------------------
+#
+# A tooltip describing the file/folder the user's attention is currently on:
+# its full path, plus (for a file) a human size and modified time.
+# `quadraui`'s event model has no mouse-hover primitive this app can reach --
+# `MouseMoved` is delivered with no hit-testing against the painted layout
+# (unlike `MouseDown`/`MouseUp`/`DoubleClick`/`Scroll`, which all resolve to a
+# `"hit"` detail or a semantic `Tree`/`DataTable` event), and the TUI
+# backend -- the one the black-box suite drives -- never emits
+# `MouseEntered`/`MouseLeft` either (crossterm surfaces no such signal). So
+# "hover" here is the row the keyboard cursor is on (the tree) or the file
+# last activated in a details table (`self.selected_file`) -- the same two
+# notions of "the thing the user means right now" `_delete_candidate` already
+# keys its own target off. Shown via `self.actions.show_tooltip` (not
+# `QuiApp.show_tooltip`, which raises "already borrowed" inside a handler --
+# see the module doc), from `_move`/`_on_row_click` (tree) and
+# `_set_selected_file` (details).
+#
+# `anchor` is a `(x, y, width, height)` rect in this app's own cell grid --
+# the same units `line_height`/`chrome_line_height`/`viewport` already
+# measure for `_tree_capacity`. It is a best-effort placement, not a
+# pixel-exact hit-test (this app has no way to ask the backend for one --
+# see above): exact for a tree row (this app owns the tree's scroll
+# offset), approximate for a details row (a `DataTable`'s own scroll offset
+# is backend-owned and never reported back). `Tooltip::layout` clamps/flips
+# the result to stay inside the viewport either way, so an approximate
+# anchor never overflows or crashes -- it just occasionally sits a row or
+# two off the exact one.
+
+
+def _tooltip_payload(widget_id: str, node: Node) -> dict:
+    """A `Tooltip` descriptor for `node`. A folder's `size_bytes`/`mtime`
+    describe the folder itself, not a meaningful "contents" summary, so
+    only a file gets the second line."""
+    lines = [str(node.path)]
+    if not node.is_dir:
+        lines.append(f"{_human_size(node.size_bytes)} · {_human_mtime(node.mtime)}")
+    return {"id": widget_id, "text": "\n".join(lines)}
+
+
 # --- native chrome: window title / dirty-dot / tray / cursor (not yet reachable) --
 #
 # C13 (window title tracking the current path, a dirty-dot during a pending
@@ -682,10 +725,9 @@ ACCELERATORS = [
 # `tests/test_window_tray.py`) because the underlying Rust `Backend` trait
 # methods are implemented for the GTK/AppKit/Win32 backends (and, for
 # `window_control`, even the TUI one, via OSC 0/1/2), but nothing in
-# `quadraui-py`'s PyO3 surface calls into them yet -- the same "`QuiApp`
-# doesn't carry the method" gap `test_chrome.py`'s own doc already notes for
-# tooltips/notifications. There is no reachable way to wire any of C13 from
-# this app until that binding work lands upstream.
+# `quadraui-py`'s PyO3 surface calls into them yet. There is no reachable
+# way to wire any of C13 from this app until that binding work lands
+# upstream.
 
 
 # --- the live QuiApp ---------------------------------------------------------
@@ -784,6 +826,17 @@ class FileManager:
         self._line_height = 1.0
         self._chrome_line_height = 1.0
         self._viewport_height = float(height)
+        self._viewport_width = float(width)
+        # Status-bar colors, same placeholder-then-overwrite dance as the
+        # metrics above: `_apply_system_theme` (below) picks the real
+        # light/dark pair from `system_theme()` right after `self.app`
+        # exists, but frame 0 renders before that, inside `QuiApp`'s own
+        # constructor -- so `_status_leaf` needs something paintable here
+        # first. Defaults dark, matching this placeholder set's previous
+        # fixed (always-dark) behavior.
+        self._status_fg = _STATUS_DARK_FG
+        self._status_bg = _STATUS_DARK_BG
+        self._status_accent = _STATUS_DARK_ACCENT
         # The preview pane's layout-tree leaf, cached from `self.selected_file`
         # by `_set_selected_file` -- see that method for why `_render` only
         # reads this instead of reading+decoding the file itself every frame.
@@ -796,23 +849,37 @@ class FileManager:
         self.app.set_handler(self._handle)
         self._line_height = self.app.line_height()
         self._chrome_line_height = self.app.chrome_line_height()
-        self._viewport_height = self.app.viewport()[1]
+        self._viewport_width, self._viewport_height, _scale = self.app.viewport()
         self._refresh_preview()  # frame 0 ran with the placeholder capacity above
         self._apply_system_theme()
         for accelerator in ACCELERATORS:
-            self.app.register_accelerator(accelerator)
+            try:
+                self.app.register_accelerator(accelerator)
+            except QuadrauiError:
+                # A backend that doesn't recognize this chord (`cmd+f` off
+                # macOS, say) rejects the registration; skip just that one
+                # entry rather than letting it raise out of `__init__` and
+                # take every other, otherwise-fine, accelerator down with it.
+                pass
 
     def _apply_system_theme(self) -> None:
         """OS theme match (C14): read the OS's light/dark preference once at
-        startup and merge in the matching VS Code-like palette. Falls back to
-        the backend's own default theme, untouched, when `system_theme()`
-        raises `InternalError` -- `Unsupported`, on the headless TUI backend
-        with no `$COLORFGBG` set (see that method's own doc)."""
+        startup and merge in the matching VS Code-like palette, and pick the
+        matching status-bar colors (`StatusBarSegment` isn't theme-driven,
+        see `_STATUS_DARK_FG`'s own doc). Falls back to the backend's own
+        default theme and the dark status colors, both untouched, when
+        `system_theme()` raises `InternalError` -- `Unsupported`, on the
+        headless TUI backend with no `$COLORFGBG` set (see that method's own
+        doc)."""
         try:
             info = self.app.system_theme()
         except InternalError:
             return
-        self.app.set_theme(_VSCODE_DARK_THEME if info["dark"] else _VSCODE_LIGHT_THEME)
+        dark = info["dark"]
+        self.app.set_theme(_VSCODE_DARK_THEME if dark else _VSCODE_LIGHT_THEME)
+        self._status_fg = _STATUS_DARK_FG if dark else _STATUS_LIGHT_FG
+        self._status_bg = _STATUS_DARK_BG if dark else _STATUS_LIGHT_BG
+        self._status_accent = _STATUS_DARK_ACCENT if dark else _STATUS_LIGHT_ACCENT
 
     # --- navigation helpers --------------------------------------------------
 
@@ -830,7 +897,9 @@ class FileManager:
     def _move(self, delta: int) -> None:
         rows, nodes = self._visible()
         i = nodes.index(self.cursor)
-        self.cursor = nodes[max(0, min(len(nodes) - 1, i + delta))]
+        new_i = max(0, min(len(nodes) - 1, i + delta))
+        self.cursor = nodes[new_i]
+        self._show_tree_tooltip(self.cursor, new_i)
 
     def _tree_capacity(self) -> int:
         """Painted rows that fit in the body's row band: the app's measured
@@ -861,6 +930,34 @@ class FileManager:
         leaf above never goes stale."""
         self.selected_file = node
         self._refresh_preview()
+        if node is not None:
+            self._show_file_tooltip(node)
+
+    def _show_tree_tooltip(self, node: Node, row_index: int) -> None:
+        """Hover tooltip (see that section's own doc) for tree row
+        `row_index`, currently painted at `node`. Anchored exactly: this
+        app owns the tree's own `scroll` offset, so the row's on-screen
+        position is fully known, not approximated."""
+        x = 0.0
+        y = self._chrome_line_height + (row_index - self.scroll) * self._line_height
+        width = max(1.0, self.ratio * self._viewport_width)
+        self.actions.show_tooltip(
+            _tooltip_payload("fm:tooltip:tree", node), (x, y, width, self._line_height)
+        )
+
+    def _show_file_tooltip(self, node: Node) -> None:
+        """Hover tooltip (see that section's own doc) for a details-table
+        row that just became `node`. Anchored near the top of the details
+        pane rather than at the row's own position: unlike the tree, this
+        app never learns a `DataTable`'s own (backend-owned) scroll offset,
+        so there is no way to know which screen row `node` actually painted
+        on."""
+        x = self.ratio * self._viewport_width
+        y = self._chrome_line_height + self._line_height  # below the table's header row
+        width = max(1.0, (1.0 - self.ratio) * self.preview_ratio * self._viewport_width)
+        self.actions.show_tooltip(
+            _tooltip_payload("fm:tooltip:details", node), (x, y, width, self._line_height)
+        )
 
     def _scroll_to_cursor(self, cursor_index: int, row_count: int) -> None:
         """Advance `scroll` so the cursor row stays within the painted window,
@@ -934,9 +1031,10 @@ class FileManager:
     def _on_row_click(self, path: list[int]) -> None:
         """A tree-row click: select that folder and toggle its expansion."""
         rows, nodes = folder_rows(self.root)
-        for row, node in zip(rows, nodes):
+        for idx, (row, node) in enumerate(zip(rows, nodes)):
             if row["path"] == list(path):
                 self.cursor = node
+                self._show_tree_tooltip(node, idx)
                 ensure_loaded(node)
                 if node.subdirs():
                     node.expanded = not node.expanded
@@ -1221,6 +1319,9 @@ class FileManager:
         # pump drains the queue, after this handler returns.
         self._remember(node)
         self.message = f"restored {node.name}"
+        # Fire-and-forget (see `send_notification`'s own doc): queued right
+        # behind the restore, with nothing here to check it landed.
+        self.actions.send_notification(title="Restored from Trash", body=node.name)
 
     def _trash(self, node: Node) -> None:
         """Move `node` to the trash, drop it from the model and any open tab,
@@ -1244,6 +1345,10 @@ class FileManager:
         if UNDO_SUPPORTED:
             toast["actions"] = [{"id": "undo", "label": "Undo", "style": "Default"}]
         self.actions.show_toast(toast=toast)
+        # Fire-and-forget (see `send_notification`'s own doc): queued right
+        # behind the toast, so a trash completing while this window isn't
+        # focused still surfaces through the OS's own notification center.
+        self.actions.send_notification(title="Moved to Trash", body=node.name)
 
     def _forget(self, node: Node) -> None:
         """Drop `node` from the model after it's been trashed: remove it from
@@ -1320,6 +1425,18 @@ class FileManager:
             },
         }
 
+    def _segment(self, text: str, *, accent: bool = False, bold: bool = False) -> dict:
+        """One `StatusBarSegment`: styled text with the colors
+        `_apply_system_theme` picked for the current OS light/dark
+        preference (see `_STATUS_DARK_FG`'s own doc for why this needs its
+        own instance-level colors rather than theme-driven `StyledText`)."""
+        return {
+            "text": text,
+            "fg": self._status_accent if accent else self._status_fg,
+            "bg": self._status_bg,
+            "bold": bold,
+        }
+
     def _status_leaf(self) -> dict:
         """The outer split's bottom pane: a live status bar showing the cursored
         folder, its item count, the open-tab summary, and any transient hint."""
@@ -1329,19 +1446,19 @@ class FileManager:
         else:
             count_text = f"{len(node.children)} items"
         left = [
-            _segment(f" {node.name} ", accent=True, bold=True),
-            _segment(f" {count_text} "),
+            self._segment(f" {node.name} ", accent=True, bold=True),
+            self._segment(f" {count_text} "),
         ]
         if self.message:
-            left.append(_segment(f" {self.message} "))
+            left.append(self._segment(f" {self.message} "))
         if self.filter_text:
-            left.append(_segment(f' filter: "{self.filter_text}" '))
+            left.append(self._segment(f' filter: "{self.filter_text}" '))
         open_n = len(self.open)
         if open_n:
-            right = [_segment(f" tab {self.active_tab + 1}/{open_n} ")]
+            right = [self._segment(f" tab {self.active_tab + 1}/{open_n} ")]
         else:
-            right = [_segment(" no tabs ")]
-        right.append(_segment(f" {int(round(self.ratio * 100))}% "))
+            right = [self._segment(" no tabs ")]
+        right.append(self._segment(f" {int(round(self.ratio * 100))}% "))
         return {
             "id": "fm:status",
             "status_bar": {
@@ -1526,7 +1643,20 @@ class FileManager:
         the same actions `_on_key` runs for the equivalent plain key,
         reached here instead because the chord (`ctrl+f`/`cmd+f`) or the
         OS-level binding (`F2`/`Delete`) arrives as its own `Accelerator`
-        event rather than a plain `KeyPressed` once registered."""
+        event rather than a plain `KeyPressed` once registered.
+
+        Dropped outright while the delete-confirm dialog or the context
+        menu is open: an `Accelerator` is matched earlier in the pipeline
+        than a plain `KeyPressed`, so it reaches this handler even while
+        one of those overlays is up and the modal's own `KeyPressed`/
+        `MouseDown` interception never gets a chance to swallow it first.
+        Without this guard, `Delete` mid-confirm re-enters
+        `_request_delete`, overwriting `_delete_target` and queueing a
+        second dialog on top of the first; `F2` opens the rename box
+        behind either overlay. Mirrors `edit_mode`'s own suppression of
+        these same accelerators, just above."""
+        if self._delete_target is not None or self._menu_target is not None:
+            return
         self.message = ""
         if accel_id == "fm:accel:rename":
             self._start_rename(self._delete_candidate())
