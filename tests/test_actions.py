@@ -4,6 +4,8 @@ the context menu, and the undo toast — all driven headlessly through
 session's pump performs per event, deferred-action drain included (see
 `app.py`'s module doc)."""
 
+from conftest import activate_child as _activate_child
+
 from quadraui_files import FileManager
 from quadraui_files.app import (
     DELETE_KEY,
@@ -19,14 +21,6 @@ ESCAPE_KEY = {"Named": "Escape"}
 def _open_root_tab(fm: FileManager) -> None:
     """Open the root folder as a details tab (cursor starts there)."""
     fm.step(_key_event(ENTER_KEY))
-
-
-def _activate_child(fm: FileManager, name: str) -> None:
-    """Click (RowActivated) the details-table row for `name` in the active
-    tab -- the way selecting a file in the listing really happens."""
-    folder = fm.open[fm.active_tab]
-    idx = [c.name for c in folder.children].index(name)
-    fm.step({"DataTable": [f"fm:grid:{fm.active_tab}", {"RowActivated": {"idx": idx}}]})
 
 
 def test_selecting_and_opening_a_file_queues_open_path_without_raising(sample_tree):

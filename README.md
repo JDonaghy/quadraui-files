@@ -52,7 +52,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 |---|---|---|
 | **T0** | Folder tree + file-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
 | **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ all backends ([known limits](#known-limits)) |
-| **T2** | Filter/search box, F2 rename, column sort | planned |
+| **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
 | **Preview** | Read-only preview pane for the selected file | planned |
 | **T3** | OS-theme match, keybindings, tooltips, notifications | planned |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | planned |
@@ -86,6 +86,15 @@ at all (`UNDO_SUPPORTED` in `app.py`) — a host capability, not a backend branc
 A right-click would be the natural way to raise the context menu, but the pinned
 quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
 them, so `Menu` is the keyboard stand-in.
+
+Press `/` for a live filter box over the active details table (Esc clears it, Enter
+keeps it applied and closes the box), `F2` to inline-rename the selected file or
+cursored folder (Enter commits a real rename on disk, Esc cancels), and click a details
+column header (Name/Size/Modified) to sort by it, click again to reverse — the active
+header shows a `▲`/`▼` marker. A rename is rejected (with a status-bar message, not a
+crash) if the typed name contains a path separator or starts with `.`: this app's model
+never lists dotfiles, so renaming onto one would just make the entry vanish on the next
+refresh.
 
 ## quadraui dependency
 

@@ -3,10 +3,10 @@ details-table column sort -- all driven headlessly through `FileManager.step`
 (push-and-dispatch plus the deferred-action drain, same as the other suites;
 see `app.py`'s module doc)."""
 
-import time
+from conftest import activate_child as _select_file
 
 from quadraui_files import FileManager
-from quadraui_files.app import ENTER_KEY, _key_event, ensure_loaded
+from quadraui_files.app import DELETE_KEY, ENTER_KEY, _key_event, ensure_loaded
 
 ESCAPE_KEY = {"Named": "Escape"}
 BACKSPACE_KEY = {"Named": "Backspace"}
@@ -67,6 +67,7 @@ def test_escape_clears_the_filter_and_restores_the_full_listing(sample_tree):
     assert fm.edit_mode is None
     assert fm.filter_text == ""
     assert sorted(_listing(fm)) == ["alpha", "beta", "readme.txt"]
+    assert "alpha/" in fm.app.screen()  # the filtered-out row is back on screen
 
 
 def test_enter_closes_the_filter_box_but_keeps_the_query_applied(sample_tree):
@@ -94,15 +95,10 @@ def test_backspace_narrows_the_filter_buffer(sample_tree):
     fm.step(_key_event(BACKSPACE_KEY))
     assert fm.edit_text == "readme"
     assert _listing(fm) == ["readme.txt"]
+    assert "readme.txt" in fm.app.screen()
 
 
 # --- F2 rename -----------------------------------------------------------
-
-
-def _select_file(fm: FileManager, name: str) -> None:
-    folder = fm.open[fm.active_tab]
-    idx = [c.name for c in fm._visible_children(folder)].index(name)
-    fm.step({"DataTable": [f"fm:grid:{fm.active_tab}", {"RowActivated": {"idx": idx}}]})
 
 
 def test_f2_renames_the_selected_file_on_disk_and_in_the_listing(sample_tree):
@@ -141,6 +137,67 @@ def test_f2_escape_cancels_the_rename_leaving_the_file_untouched(sample_tree):
     assert fm.edit_mode is None
     assert (sample_tree / "readme.txt").exists()
     assert "readme.txt" in _listing(fm)
+    assert "readme.txt" in fm.app.screen()
+
+
+def test_f2_rename_with_a_path_separator_is_rejected_not_raised(sample_tree):
+    """A slash in the typed name would make `Path.with_name` raise
+    `ValueError` if unguarded -- the real crash this file manager must
+    never hit on a plausible keystroke (see `app.py`'s `_invalid_rename_name`
+    doc). It must be reported via the status message, not escape the
+    handler."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _select_file(fm, "readme.txt")
+
+    fm.step(_key_event(F2_KEY))
+    for _ in range(len("readme.txt")):
+        fm.step(_key_event(BACKSPACE_KEY))
+    _type(fm, "sub/name")
+    fm.step(_key_event(ENTER_KEY))  # must not raise out of the handler
+
+    assert fm.edit_mode is None
+    assert (sample_tree / "readme.txt").exists()
+    assert "readme.txt" in _listing(fm)
+    assert "separator" in fm.app.screen()
+
+
+def test_f2_rename_to_a_bare_dot_is_rejected_not_raised(sample_tree):
+    """`Path("x").with_name(".")` raises `ValueError` too -- same guard,
+    different plausible keystroke."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _select_file(fm, "readme.txt")
+
+    fm.step(_key_event(F2_KEY))
+    for _ in range(len("readme.txt")):
+        fm.step(_key_event(BACKSPACE_KEY))
+    _type(fm, ".")
+    fm.step(_key_event(ENTER_KEY))  # must not raise out of the handler
+
+    assert fm.edit_mode is None
+    assert (sample_tree / "readme.txt").exists()
+    assert "readme.txt" in _listing(fm)
+
+
+def test_f2_rename_to_a_hidden_name_is_rejected(sample_tree):
+    """A leading dot is rejected outright: `load_children` skips dotfiles,
+    so a renamed entry would vanish from the listing on the next refresh."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _select_file(fm, "readme.txt")
+
+    fm.step(_key_event(F2_KEY))
+    for _ in range(len("readme.txt")):
+        fm.step(_key_event(BACKSPACE_KEY))
+    _type(fm, ".hidden")
+    fm.step(_key_event(ENTER_KEY))
+
+    assert fm.edit_mode is None
+    assert (sample_tree / "readme.txt").exists()
+    assert not (sample_tree / ".hidden").exists()
+    assert "readme.txt" in _listing(fm)
+    assert "hidden" in fm.app.screen()
 
 
 def test_f2_renaming_a_folder_updates_children_paths_too(sample_tree):
@@ -168,27 +225,71 @@ def test_f2_renaming_a_folder_updates_children_paths_too(sample_tree):
     assert child.path == sample_tree / "gamma" / "notes.txt"
 
 
+# --- non-key events during an open filter/rename box ----------------------
+
+
+def test_toast_undo_still_works_while_the_filter_box_is_open(sample_tree):
+    """Trash a file, open the filter box before clicking the undo toast's
+    button -- `_handle_edit_key` must let the non-key `ToastActionClicked`
+    event fall through to the normal dispatch rather than swallowing it the
+    way it swallows a keystroke."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _select_file(fm, "readme.txt")
+    fm.step(_key_event(DELETE_KEY))
+    fm.step(_key_event(ENTER_KEY))  # confirm the trash; the undo toast appears
+    assert not (sample_tree / "readme.txt").exists()
+
+    fm.step(_char_event("/"))  # open the filter box while the toast is still up
+    assert fm.edit_mode == "filter"
+
+    fm.step({"ToastActionClicked": "undo"})
+
+    assert (sample_tree / "readme.txt").exists(), "Undo should still work while filtering"
+    assert fm.edit_mode == "filter"  # the box itself is untouched by the click
+
+
+def test_clicking_a_filtered_row_opens_it_without_closing_the_box_first(sample_tree):
+    """A `DataTable`/`RowActivated` click is a non-key event too, so the
+    natural "find and open" flow -- type a filter, then click the matching
+    row -- works without first pressing Enter to close the box."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+
+    fm.step(_char_event("/"))
+    _type(fm, "al")
+    assert _listing(fm) == ["alpha"]
+
+    fm.step({"DataTable": ["fm:grid:0", {"RowActivated": {"idx": 0}}]})
+
+    assert fm.edit_mode == "filter"  # the click didn't close the box
+    assert any(f.name == "alpha" for f in fm.open)  # but it did drill in
+
+
 # --- column sort -----------------------------------------------------------
 
 
-def test_clicking_a_header_sorts_the_table_and_clicking_again_reverses_it(
-    sample_tree, tmp_path
-):
+def test_clicking_a_header_sorts_the_table_and_clicking_again_reverses_it(sample_tree):
     # `sample_tree`'s "alpha"/"beta" sort identically by name and by size
-    # (both directories, size None) -- use distinct file sizes/mtimes so a
-    # Size-column sort has an unambiguous order to assert on.
+    # (both directories, size None) -- distinct file sizes give a Size-column
+    # sort an unambiguous order to assert on.
     (sample_tree / "small.bin").write_bytes(b"x")
-    time.sleep(0.01)
     (sample_tree / "big.bin").write_bytes(b"x" * 1000)
 
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
 
-    fm.step({"DataTable": [f"fm:grid:0", {"HeaderClicked": {"col": 1}}]})
+    fm.step({"DataTable": ["fm:grid:0", {"HeaderClicked": {"col": 1}}]})
     ascending = _listing(fm)
     assert ascending.index("small.bin") < ascending.index("big.bin")
+    screen = fm.app.screen()
+    assert screen.index("small.bin") < screen.index("big.bin")
+    assert "Size ▲" in screen  # the active sort column/direction indicator
 
-    fm.step({"DataTable": [f"fm:grid:0", {"HeaderClicked": {"col": 1}}]})
+    fm.step({"DataTable": ["fm:grid:0", {"HeaderClicked": {"col": 1}}]})
     descending = _listing(fm)
     assert descending.index("big.bin") < descending.index("small.bin")
     assert descending == list(reversed(ascending))
+    screen = fm.app.screen()
+    assert screen.index("big.bin") < screen.index("small.bin")
+    assert "Size ▼" in screen
