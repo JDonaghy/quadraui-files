@@ -90,7 +90,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from quadraui import QuiApp
+from quadraui import InternalError, QuiApp
 
 # Can a trashed path be put back? `restore_from_trash` is implemented for the
 # freedesktop.org trash spec (Linux/BSD) and the Windows recycle bin, and
@@ -557,8 +557,9 @@ TOOLBAR = {
         {"Action": {"id": "fm:k:refresh", "label": "r Refresh"}},
         {"Action": {"id": "fm:k:delete", "label": "Del Trash"}},
         {"Action": {"id": "fm:k:menu", "label": "Menu ≡"}},
-        {"Action": {"id": "fm:k:search", "label": "/ Search"}},
+        {"Action": {"id": "fm:k:search", "label": "/ or ^F Search"}},
         {"Action": {"id": "fm:k:rename", "label": "F2 Rename"}},
+        {"Action": {"id": "fm:k:quit", "label": "q Quit"}},
     ],
 }
 
@@ -578,6 +579,94 @@ def _segment(text: str, *, accent: bool = False, bold: bool = False) -> dict:
         "bg": _STATUS_BG,
         "bold": bold,
     }
+
+
+# --- chrome: OS theme + global keybindings -----------------------------------
+#
+# `set_theme`/`register_accelerator` are, like `line_height`/`chrome_line_height`
+# in `FileManager.__init__`, only reachable from top-level code: both need the
+# same exclusive borrow on `QuiApp` that `_handle`/`_render` already hold for
+# the whole dispatch that invokes them, so calling either from inside one
+# raises the same "already borrowed" error the module doc's reentrancy note
+# describes for the overlay/OS calls -- and neither is on the `QuiApp.actions()`
+# handle that works around that for those. Called once, from `__init__`,
+# before `run_tui`/`run_native` ever takes over: both "take effect immediately
+# on this app's own live backend" and are separately replayed onto whichever
+# real backend a later `run_tui`/`run_native` call constructs, so one call here
+# covers every backend.
+
+# A VS Code-like palette, as a `set_theme` override merged onto whichever
+# backend's own default theme -- only the handful of `Theme` fields this app's
+# own chrome (tree, details grid, tabs, status bar) actually paints need a
+# value here; every other field keeps the installed theme's own default.
+_VSCODE_DARK_THEME = {
+    "background": "#1e1e1e",
+    "foreground": "#d4d4d4",
+    "surface_bg": "#252526",
+    "surface_fg": "#cccccc",
+    "accent_bg": "#007acc",
+    "accent_fg": "#ffffff",
+    "selected_bg": "#264f78",
+    "selection_bg": "#264f78",
+    "hover_bg": "#2a2d2e",
+    "hover_fg": "#d4d4d4",
+    "header_bg": "#2d2d2d",
+    "header_fg": "#cccccc",
+    "border_fg": "#3c3c3c",
+    "separator": "#3c3c3c",
+    "muted_fg": "#9d9d9d",
+    "tab_bar_bg": "#252526",
+    "tab_active_bg": "#1e1e1e",
+    "tab_active_fg": "#ffffff",
+    "tab_inactive_fg": "#969696",
+    "input_bg": "#3c3c3c",
+    "scrollbar_thumb": "#424242",
+    "scrollbar_track": "#1e1e1e",
+}
+
+_VSCODE_LIGHT_THEME = {
+    "background": "#ffffff",
+    "foreground": "#1e1e1e",
+    "surface_bg": "#f3f3f3",
+    "surface_fg": "#424242",
+    "accent_bg": "#005fb8",
+    "accent_fg": "#ffffff",
+    "selected_bg": "#add6ff",
+    "selection_bg": "#add6ff",
+    "hover_bg": "#e8e8e8",
+    "hover_fg": "#1e1e1e",
+    "header_bg": "#f3f3f3",
+    "header_fg": "#424242",
+    "border_fg": "#c8c8c8",
+    "separator": "#c8c8c8",
+    "muted_fg": "#6e6e6e",
+    "tab_bar_bg": "#f3f3f3",
+    "tab_active_bg": "#ffffff",
+    "tab_active_fg": "#1e1e1e",
+    "tab_inactive_fg": "#6e6e6e",
+    "input_bg": "#ffffff",
+    "scrollbar_thumb": "#c2c2c2",
+    "scrollbar_track": "#f3f3f3",
+}
+
+# Real OS-level accelerators (C15) for the bindings that are safe to claim
+# globally. `register_accelerator`'s `scope` only ever matches as `Global`
+# today -- `Widget`/`Mode` are accepted but silently never fire, see that
+# method's own doc -- so there is no way to suppress a binding while the
+# filter/rename text box has focus. Only non-printable/chorded bindings are
+# registered here for exactly that reason: a single printable letter (`r`
+# reload, `q` quit, a bare `Enter` to open) stays a plain, Python-dispatched
+# key instead of a registered accelerator, since claiming one of those
+# globally would steal it from the edit box unconditionally, breaking typing
+# that very letter into a rename/filter query. `_handle` still ignores every
+# accelerator below while `edit_mode` is set, same as it already ignores the
+# equivalent plain keys there.
+ACCELERATORS = [
+    {"id": "fm:accel:rename", "binding": {"Literal": "F2"}, "scope": "Global", "label": "Rename"},
+    {"id": "fm:accel:delete", "binding": {"Literal": "Delete"}, "scope": "Global", "label": "Move to Trash"},
+    {"id": "fm:accel:search", "binding": {"Literal": "ctrl+f"}, "scope": "Global", "label": "Search"},
+    {"id": "fm:accel:search_cmd", "binding": {"Literal": "cmd+f"}, "scope": "Global", "label": "Search"},
+]
 
 
 # --- the live QuiApp ---------------------------------------------------------
@@ -690,6 +779,21 @@ class FileManager:
         self._chrome_line_height = self.app.chrome_line_height()
         self._viewport_height = self.app.viewport()[1]
         self._refresh_preview()  # frame 0 ran with the placeholder capacity above
+        self._apply_system_theme()
+        for accelerator in ACCELERATORS:
+            self.app.register_accelerator(accelerator)
+
+    def _apply_system_theme(self) -> None:
+        """OS theme match (C14): read the OS's light/dark preference once at
+        startup and merge in the matching VS Code-like palette. Falls back to
+        the backend's own default theme, untouched, when `system_theme()`
+        raises `InternalError` -- `Unsupported`, on the headless TUI backend
+        with no `$COLORFGBG` set (see that method's own doc)."""
+        try:
+            info = self.app.system_theme()
+        except InternalError:
+            return
+        self.app.set_theme(_VSCODE_DARK_THEME if info["dark"] else _VSCODE_LIGHT_THEME)
 
     # --- navigation helpers --------------------------------------------------
 
@@ -1319,6 +1423,18 @@ class FileManager:
         if self.edit_mode is not None and self._handle_edit_key(event):
             return
 
+        # `edit_mode is not None` here means `_handle_edit_key` returned
+        # False just above -- an event that isn't a key at all, not an
+        # accelerator the filter/rename box is meant to swallow. Every
+        # accelerator registered in `ACCELERATORS` maps onto an action the
+        # edit box already suppresses from its equivalent plain key (see
+        # that list's own doc), so this drops it the same way instead of
+        # firing while the box has focus.
+        if "Accelerator" in event:
+            if self.edit_mode is None:
+                self._on_accelerator(event["Accelerator"][0])
+            return
+
         if "MessageDialogResolved" in event:
             self._on_dialog_resolved(event["MessageDialogResolved"])
             return
@@ -1385,6 +1501,20 @@ class FileManager:
             self._start_filter()
         elif name == "F2":
             self._start_rename(self._delete_candidate())
+
+    def _on_accelerator(self, accel_id: str) -> None:
+        """A registered global accelerator (C15, `ACCELERATORS`) fired --
+        the same actions `_on_key` runs for the equivalent plain key,
+        reached here instead because the chord (`ctrl+f`/`cmd+f`) or the
+        OS-level binding (`F2`/`Delete`) arrives as its own `Accelerator`
+        event rather than a plain `KeyPressed` once registered."""
+        self.message = ""
+        if accel_id == "fm:accel:rename":
+            self._start_rename(self._delete_candidate())
+        elif accel_id == "fm:accel:delete":
+            self._request_delete(self._delete_candidate())
+        elif accel_id in ("fm:accel:search", "fm:accel:search_cmd"):
+            self._start_filter()
 
 
 # --- inspection / headless helpers -------------------------------------------
