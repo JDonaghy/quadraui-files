@@ -4,53 +4,20 @@ Enter/`o` once the table has focus, or the context menu's Open does that. On
 a folder row, a single click selects it the same way; only a double-click
 drills in (mirrors the details pane in Finder/Explorer).
 
-Driven with real synthesized `MouseDown`/`MouseUp` at painted coordinates,
-not hand-built `DataTable` events -- the whole point here is the real
-click/double-click distinction the installed quadraui build now reports
-(see `test_tree_click.py`'s own doc on the double-click detection window
-this reuses)."""
+Driven with real synthesized clicks at painted coordinates, not hand-built
+`DataTable` events -- the whole point here is the real click/double-click
+distinction the installed quadraui build now reports (see `conftest.py`'s
+`click`/`double_click` doc)."""
 
-import time
-
+from conftest import click as _click
+from conftest import double_click as _double_click
+from conftest import find_row as _find_row
 from quadraui_files import FileManager
 from quadraui_files.app import ENTER_KEY, _key_event
-
-NO_MODS = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
-
-# Two clicks fired back-to-back land close enough in real wall-clock time to
-# coalesce into a double-click; a deliberately separated pair needs this
-# much of a gap to read as two single clicks instead -- see
-# `test_tree_click.py`'s own doc on the same window.
-_DOUBLE_CLICK_WINDOW_S = 0.6
-
-
-def _let_double_click_window_pass() -> None:
-    time.sleep(_DOUBLE_CLICK_WINDOW_S)
-
-
-def _click(fm: FileManager, x: float, y: float) -> None:
-    for kind in ("MouseDown", "MouseUp"):
-        fm.app.push_event({kind: {"position": {"x": x, "y": y}, "button": "Left", "modifiers": NO_MODS}})
-        fm.app.step()
-
-
-def _double_click(fm: FileManager, x: float, y: float) -> None:
-    _click(fm, x, y)
-    _click(fm, x, y)
 
 
 def _open_root_tab(fm: FileManager) -> None:
     fm.step(_key_event(ENTER_KEY))
-
-
-def _find_row(fm: FileManager, text: str) -> tuple[float, float]:
-    """(x, y) of `text`'s first occurrence on the painted screen -- clicking
-    here lands inside that details-table row."""
-    for y, line in enumerate(fm.app.screen().splitlines()):
-        x = line.find(text)
-        if x >= 0:
-            return float(x + 1), float(y)
-    raise AssertionError(f"{text!r} not on screen:\n{fm.app.screen()}")
 
 
 def test_single_click_on_a_file_row_selects_and_previews_without_opening(sample_tree):
@@ -119,7 +86,6 @@ def test_o_key_opens_the_row_a_click_just_focused_and_selected(sample_tree):
 
     x, y = _find_row(fm, "readme.txt")
     _click(fm, x, y)
-    _let_double_click_window_pass()  # a lone click, not a double-click
 
     fm.step(_key_event({"Char": "o"}))
 

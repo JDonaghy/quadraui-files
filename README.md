@@ -119,13 +119,12 @@ pane**; opening it with the OS's default app (or, for a folder, drilling in) nee
 double-click, Enter/`o` once the table has focus, or the context menu's Open — a plain
 click never opens anything, so browsing the listing doesn't fire off an app per row. The
 preview pane is a third region to the right of the details table behind its own
-resizable divider: a one-line
-header names the selected file (with its size and modified time, space permitting) and
-carries a `×` close control; below it, text content renders read-only, pinned to the
-file's head, while binary or unreadable files show a short `N bytes · <type>`
-placeholder instead. Press `p` (or click the header's `×`) to hide the pane and give its
-width back to the details table; press `p` again to bring it back at the same divider
-ratio.
+resizable divider: a one-line header names the selected file (with its size and modified
+time, space permitting) and carries a `×` close control; below it, text content renders
+read-only, pinned to the file's head, while binary or unreadable files show a short
+`N bytes · <type>` placeholder instead. Press `p` (or click the header's `×`) to hide the
+pane and give its width back to the details table; press `p` again to bring it back at
+the same divider ratio.
 
 ## quadraui dependency
 

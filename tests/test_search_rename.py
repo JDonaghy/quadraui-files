@@ -4,7 +4,9 @@ details-table column sort -- all driven headlessly through `FileManager.step`
 see `app.py`'s module doc)."""
 
 import pytest
-from conftest import activate_child as _select_file
+from conftest import activate_child as _activate_file
+from conftest import click as _click
+from conftest import find_row as _find_row
 
 from quadraui_files import FileManager
 from quadraui_files.app import DELETE_KEY, ENTER_KEY, UNDO_SUPPORTED, _key_event, ensure_loaded
@@ -105,7 +107,7 @@ def test_backspace_narrows_the_filter_buffer(sample_tree):
 def test_f2_renames_the_selected_file_on_disk_and_in_the_listing(sample_tree):
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
-    _select_file(fm, "readme.txt")
+    _activate_file(fm, "readme.txt")
 
     fm.step(_key_event(F2_KEY))
     assert fm.edit_mode == "rename"
@@ -129,7 +131,7 @@ def test_f2_renames_the_selected_file_on_disk_and_in_the_listing(sample_tree):
 def test_f2_escape_cancels_the_rename_leaving_the_file_untouched(sample_tree):
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
-    _select_file(fm, "readme.txt")
+    _activate_file(fm, "readme.txt")
 
     fm.step(_key_event(F2_KEY))
     _type(fm, "xxx")
@@ -149,7 +151,7 @@ def test_f2_rename_with_a_path_separator_is_rejected_not_raised(sample_tree):
     handler."""
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
-    _select_file(fm, "readme.txt")
+    _activate_file(fm, "readme.txt")
 
     fm.step(_key_event(F2_KEY))
     for _ in range(len("readme.txt")):
@@ -168,7 +170,7 @@ def test_f2_rename_to_a_bare_dot_is_rejected_not_raised(sample_tree):
     different plausible keystroke."""
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
-    _select_file(fm, "readme.txt")
+    _activate_file(fm, "readme.txt")
 
     fm.step(_key_event(F2_KEY))
     for _ in range(len("readme.txt")):
@@ -186,7 +188,7 @@ def test_f2_rename_to_a_hidden_name_is_rejected(sample_tree):
     so a renamed entry would vanish from the listing on the next refresh."""
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
-    _select_file(fm, "readme.txt")
+    _activate_file(fm, "readme.txt")
 
     fm.step(_key_event(F2_KEY))
     for _ in range(len("readme.txt")):
@@ -237,7 +239,7 @@ def test_toast_undo_still_works_while_the_filter_box_is_open(sample_tree):
     way it swallows a keystroke."""
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
-    _select_file(fm, "readme.txt")
+    _activate_file(fm, "readme.txt")
     fm.step(_key_event(DELETE_KEY))
     fm.step(_key_event(ENTER_KEY))  # confirm the trash; the undo toast appears
     assert not (sample_tree / "readme.txt").exists()
@@ -266,6 +268,62 @@ def test_double_clicking_a_filtered_row_opens_it_without_closing_the_box_first(s
 
     assert fm.edit_mode == "filter"  # the double-click didn't close the box
     assert any(f.name == "alpha" for f in fm.open)  # but it did drill in
+
+
+# --- a real click, then the edit box's own keyboard ------------------------
+#
+# A click on a details-table row moves the engine's own keyboard focus onto
+# the table (not just this app's `table_focus` bookkeeping), the same
+# click-to-focus every tab stop gets. Reaching these two cases needs that
+# real engine focus, which `_activate_file`'s hand-built `RowActivated`
+# never sets up -- so they drive the click through `conftest.click` at
+# painted coordinates, same as `tests/test_detail_click.py`.
+
+
+def test_f2_rename_after_a_row_click_still_commits_on_enter(sample_tree):
+    """Clicking a row, then F2, then Enter must commit the rename -- not
+    hand the file to the OS, which is what a focused table's own Enter
+    handling would do if the edit box's keyboard ownership weren't
+    respected while it's open."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+
+    x, y = _find_row(fm, "readme.txt")
+    _click(fm, x, y)
+    assert fm.selected_file is not None and fm.selected_file.name == "readme.txt"
+
+    fm.step(_key_event(F2_KEY))
+    assert fm.edit_mode == "rename"
+    for _ in range(4):
+        fm.step(_key_event(BACKSPACE_KEY))
+    _type(fm, ".md")
+    fm.step(_key_event(ENTER_KEY))
+
+    assert fm.edit_mode is None, "Enter must commit the rename, not open the file"
+    assert fm.actions.opened == []
+    assert (sample_tree / "readme.md").exists()
+    assert not (sample_tree / "readme.txt").exists()
+
+
+def test_filter_after_a_row_click_still_closes_on_enter(sample_tree):
+    """Clicking a row that the filter query still matches, then Enter, must
+    close the filter box -- not open that row with the OS."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+
+    x, y = _find_row(fm, "readme.txt")
+    _click(fm, x, y)
+    assert fm.selected_file is not None and fm.selected_file.name == "readme.txt"
+
+    fm.step(_char_event("/"))
+    _type(fm, "readme")
+    assert _listing(fm) == ["readme.txt"]
+
+    fm.step(_key_event(ENTER_KEY))
+
+    assert fm.edit_mode is None, "Enter must close the filter box, not open the file"
+    assert fm.actions.opened == []
+    assert fm.filter_text == "readme"
 
 
 # --- column sort -----------------------------------------------------------

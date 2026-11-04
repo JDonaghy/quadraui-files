@@ -17,32 +17,12 @@ bug rather than on this file's own behavior."""
 
 import os
 import sys
-import time
 
 import pytest
 
+from conftest import click as _click
+from conftest import let_double_click_window_pass as _let_double_click_window_pass
 from quadraui_files import FileManager
-
-NO_MODS = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
-
-# quadraui's double-click detection keys off real wall-clock time between two
-# `MouseDown`/`MouseUp` pairs, not anything carried on the event itself --
-# so two clicks fired back-to-back (as these tests otherwise would) land
-# close enough in time to coalesce into a `RowDoubleClicked` instead of two
-# `RowClicked`s, even on two different rows. A real user's two clicks are
-# never this close together; tests that click twice call `_let_double_click_window_pass()`
-# between them to get the same single-click behaviour a real click sequence would.
-_DOUBLE_CLICK_WINDOW_S = 0.6
-
-
-def _let_double_click_window_pass() -> None:
-    time.sleep(_DOUBLE_CLICK_WINDOW_S)
-
-
-def _click(fm: FileManager, x: float, y: float) -> None:
-    for kind in ("MouseDown", "MouseUp"):
-        fm.app.push_event({kind: {"position": {"x": x, "y": y}, "button": "Left", "modifiers": NO_MODS}})
-        fm.app.step()
 
 
 def _row_icon_x(fm: FileManager, name: str) -> tuple[int, int]:
