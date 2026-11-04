@@ -115,9 +115,13 @@ never lists dotfiles, so renaming onto one would just make the entry vanish on t
 refresh.
 
 Activating a file row (click or Enter) also loads it into the **preview pane**, a third
-region to the right of the details table behind its own resizable divider: text content
-renders read-only, pinned to the file's head; binary or unreadable files show a short
-`N bytes · <type>` placeholder instead.
+region to the right of the details table behind its own resizable divider: a one-line
+header names the selected file (with its size and modified time, space permitting) and
+carries a `×` close control; below it, text content renders read-only, pinned to the
+file's head, while binary or unreadable files show a short `N bytes · <type>`
+placeholder instead. Press `p` (or click the header's `×`) to hide the pane and give its
+width back to the details table; press `p` again to bring it back at the same divider
+ratio.
 
 ## quadraui dependency
 

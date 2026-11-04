@@ -584,22 +584,30 @@ def preview_leaf(node: Node | None, *, capacity: int) -> dict:
 #
 # A one-line header above the preview's own content, naming what it's
 # showing: the file name (ellipsised -- there's no char-width/pixel-width
-# metric this app can read back from either backend, see `_tooltip_payload`'s
-# own doc for the same limitation, so this is a conservative character cap
-# rather than a pixel-exact one) on the left, its size and modified time on
-# the right, same pairing `_tooltip_payload` already shows for a file. Built
-# with `status_bar` -- the same left/right-segment primitive the bottom
-# status bar already uses -- rather than `text_display`, because a
+# metric this app can read back from either backend, similar to why
+# `_show_file_tooltip` can't learn a `DataTable`'s own scroll offset, so
+# this is a conservative character cap rather than a pixel-exact one) and
+# its size, paired the same way `_tooltip_payload` already pairs them for a
+# file, both in the header's *left* segments -- `StatusBar`'s own layout
+# never drops a left segment, unlike the right half's priority-drop (see
+# `fit_right_start`'s doc at the pin), so the size survives at realistic
+# window widths instead of being the first thing dropped. The modified
+# time and the close control are the right segments, ordered least-
+# important first (`fit_right_start`'s own convention) so a narrow column
+# drops the timestamp before ever touching the close control. Built with
+# `status_bar` -- the same left/right-segment primitive the bottom status
+# bar already uses -- rather than `text_display`, because a
 # `StatusBarSegment` can carry an `action_id`: the close control is just a
 # segment with one set, and clicking it raises a `StatusBar`/`SegmentClicked`
 # event carrying that id back, same mechanism a closable tab's × already
 # relies on for its own `TabClosed`. No bespoke hit-testing or widget needed.
 
 PREVIEW_HEADER_CLOSE_ACTION = "fm:preview:close"
-_PREVIEW_NAME_MAX_CHARS = 40  # conservative cap; see this section's own doc
+_PREVIEW_NAME_MAX_CHARS = 40  # upper bound; the header leaf tightens this per the column's own width
+_PREVIEW_HEADER_RESERVED_CELLS = 2 + 3  # MIN_GAP_CELLS + " × " -- see the header leaf's own doc
 
 
-def _ellipsize(name: str, max_chars: int = _PREVIEW_NAME_MAX_CHARS) -> str:
+def _ellipsize(name: str, max_chars: int) -> str:
     """`name` capped to `max_chars` characters, with a trailing "…" marker
     when it had to be cut."""
     if len(name) <= max_chars:
@@ -607,16 +615,19 @@ def _ellipsize(name: str, max_chars: int = _PREVIEW_NAME_MAX_CHARS) -> str:
     return name[: max_chars - 1] + "…"
 
 
-def _preview_header_text(node: Node | None) -> tuple[str, str]:
-    """`(left, right)` text for the preview header: the file name (left) and
-    its size/modified time (right); `""` on the right where there's nothing
-    to say about it (no selection, or a folder -- `preview_lines` already
+def _preview_header_parts(node: Node | None) -> tuple[str, str, str]:
+    """`(name, size, modified)` text for the preview header. `name` is the
+    raw, un-ellipsized file name (or "No file selected") -- how much of it
+    actually fits depends on the column's current cell width, which this
+    free function has no way to read, so sizing it is the header leaf's
+    job. `size`/`modified` are `""` where there's nothing to say about
+    either (no selection, or a folder -- `_tooltip_payload` already
     reports a folder's own size/mtime as meaningless, see its own doc)."""
     if node is None:
-        return "No file selected", ""
+        return "No file selected", "", ""
     if node.is_dir:
-        return _ellipsize(node.name), ""
-    return _ellipsize(node.name), f"{_human_size(node.size_bytes)} · {_human_mtime(node.mtime)}"
+        return node.name, "", ""
+    return node.name, _human_size(node.size_bytes), _human_mtime(node.mtime)
 
 
 # --- chrome: toolbar band + status bar ---------------------------------------
@@ -635,12 +646,12 @@ TOOLBAR = {
         {"Action": {"id": "fm:k:expand", "label": "→ Expand"}},
         {"Action": {"id": "fm:k:collapse", "label": "← Collapse"}},
         {"Action": {"id": "fm:k:open", "label": "↵ Open"}},
+        {"Action": {"id": "fm:k:preview", "label": "p Preview"}},
         {"Action": {"id": "fm:k:refresh", "label": "r Refresh"}},
         {"Action": {"id": "fm:k:delete", "label": "Del Trash"}},
         {"Action": {"id": "fm:k:menu", "label": "Menu ≡"}},
         {"Action": {"id": "fm:k:search", "label": "/ or ^F Search"}},
         {"Action": {"id": "fm:k:rename", "label": "F2 Rename"}},
-        {"Action": {"id": "fm:k:preview", "label": "p Preview"}},
         {"Action": {"id": "fm:k:quit", "label": "q Quit"}},
     ],
 }
@@ -1259,10 +1270,15 @@ class FileManager:
         pane rather than at the row's own position: unlike the tree, this
         app never learns a `DataTable`'s own (backend-owned) scroll offset,
         so there is no way to know which screen row `node` actually painted
-        on."""
+        on. The details pane's own width is `preview_ratio`'s fraction of
+        the body's second split only while the preview is actually showing
+        and that split exists at all; with the preview hidden, the details
+        pane fills that whole second slot by itself (`_render`'s own doc)."""
         x = self.ratio * self._viewport_width
         y = self._chrome_line_height + self._line_height  # below the table's header row
-        width = max(1.0, (1.0 - self.ratio) * self.preview_ratio * self._viewport_width)
+        second_split_width = (1.0 - self.ratio) * self._viewport_width
+        details_width = second_split_width * self.preview_ratio if self.preview_visible else second_split_width
+        width = max(1.0, details_width)
         self.actions.show_tooltip(
             _tooltip_payload("fm:tooltip:details", node), (x, y, width, self._line_height)
         )
@@ -1800,21 +1816,50 @@ class FileManager:
             },
         }
 
+    def _preview_column_width_cells(self) -> float:
+        """Cell width of the preview column (header + content): the
+        viewport's share left after the tree pane (`ratio`) and the
+        details pane (`preview_ratio` of what's left) are taken out --
+        the complementary fraction to `_show_file_tooltip`'s own details-
+        pane width."""
+        return max(1.0, (1.0 - self.ratio) * (1.0 - self.preview_ratio) * self._viewport_width)
+
+    def _preview_header_name_max_chars(self, size_text: str) -> int:
+        """How many characters the header's name segment gets before
+        `_ellipsize` has to cut it: the preview column's own cell width,
+        less the size segment sitting next to it (never priority-dropped,
+        so it must always fit too) and `_PREVIEW_HEADER_RESERVED_CELLS`
+        for the close control and the left/right min gap -- capped at
+        `_PREVIEW_NAME_MAX_CHARS` so a very wide window doesn't paint an
+        absurdly long name."""
+        column_width = int(self._preview_column_width_cells())
+        size_cells = len(size_text) + 2 if size_text else 0  # padded " <size> "
+        name_padding = 2  # padded " <name> "
+        budget = column_width - size_cells - _PREVIEW_HEADER_RESERVED_CELLS - name_padding
+        return max(4, min(_PREVIEW_NAME_MAX_CHARS, budget))
+
     def _preview_header_leaf(self) -> dict:
-        """The preview column's one-line header: the file name on the left,
-        its size/modified time on the right, and a close (×) control past
-        that -- see the preview-header section's own doc for why a
-        `status_bar` fits this and how the close control actually fires."""
-        left_text, right_text = _preview_header_text(self.selected_file)
+        """The preview column's one-line header: the file name and its size
+        as left segments (left segments are never priority-dropped, so the
+        size always survives), the modified time and a close (×) control
+        as right segments ordered least-important first (so a narrow
+        column drops the timestamp, never the close control) -- see the
+        preview-header section's own doc for why a `status_bar` fits this
+        and how the close control actually fires."""
+        name, size, mtime = _preview_header_parts(self.selected_file)
+        name = _ellipsize(name, self._preview_header_name_max_chars(size))
+        left_segments = [self._segment(f" {name} ", bold=True)]
+        if size:
+            left_segments.append(self._segment(f" {size} "))
         right_segments = []
-        if right_text:
-            right_segments.append(self._segment(f" {right_text} "))
+        if mtime:
+            right_segments.append(self._segment(f" {mtime} "))
         right_segments.append(self._segment(" × ", action_id=PREVIEW_HEADER_CLOSE_ACTION))
         return {
             "id": "fm:preview_header",
             "status_bar": {
                 "id": "fm:preview_header",
-                "left_segments": [self._segment(f" {left_text} ", bold=True)],
+                "left_segments": left_segments,
                 "right_segments": right_segments,
             },
         }
