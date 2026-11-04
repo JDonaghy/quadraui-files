@@ -48,7 +48,12 @@ Interaction (keyboard drives, mouse works too):
   F2           open an inline rename box seeded with the selected file's
                (or cursored folder's) name; Enter commits a real rename on
                disk, Esc cancels
-  click a tree row         select it and toggle its expansion
+  click a tree row         select it and show it in the details pane,
+                            replacing the active tab's folder (expansion is
+                            untouched -- only the chevron, or Left/Right,
+                            expands/collapses)
+  click a tree chevron     expand or collapse that row, leaving the
+                            cursor/details pane untouched
   activate a details row   drill into that subfolder, or open a file with
                             the OS's default app for it
   click a details header   sort every open details table by that column
@@ -139,6 +144,7 @@ class Node:
     children: list["Node"] | None = None
     expanded: bool = False
     load_error: bool = False
+    load_error_reason: str | None = None  # e.g. "Permission denied", set with load_error
 
     def subdirs(self) -> list["Node"]:
         """Loaded child directories in display order (empty if not loaded)."""
@@ -183,15 +189,20 @@ def _invalid_rename_name(new_name: str) -> str | None:
 
 def load_children(node: Node) -> None:
     """Read `node`'s immediate children (one level only), dotfiles skipped and
-    directories sorted first. On an unreadable directory, leaves it empty and
-    flags `load_error`. Files are a no-op."""
+    directories sorted first. On an unreadable directory (`PermissionError`/
+    other `OSError` -- e.g. macOS blocking `~/Documents` for some terminals
+    under its privacy sandbox), leaves it empty and flags `load_error`, with
+    `load_error_reason` set to the OS's own message (`exc.strerror`) so a
+    caller can tell the user *why*, not just that it failed. Files are a
+    no-op."""
     if not node.is_dir:
         return
     try:
         entries = [c for c in node.path.iterdir() if not c.name.startswith(".")]
-    except OSError:
+    except OSError as exc:
         node.children = []
         node.load_error = True
+        node.load_error_reason = exc.strerror or str(exc)
         return
     kids = [
         Node(
@@ -207,6 +218,7 @@ def load_children(node: Node) -> None:
     kids.sort(key=_sort_key)
     node.children = kids
     node.load_error = False
+    node.load_error_reason = None
 
 
 def ensure_loaded(node: Node) -> None:
@@ -416,7 +428,8 @@ def details_table(
     shown = all_children if children is None else children
     if not shown:
         if folder.load_error:
-            note = "(unreadable)"
+            reason = folder.load_error_reason
+            note = f"(can't read: {reason})" if reason else "(unreadable)"
         elif all_children:
             note = "(no matches)"
         else:
@@ -904,6 +917,11 @@ class FileManager:
         self.active_tab = 0             # index into self.open
         self.message = ""               # transient status hint
         self.selected_file: Node | None = None  # last file activated in a details tab
+        # `build_root` already attempted the root's own load; surface it
+        # right away rather than leaving the tree looking like an ordinary
+        # empty folder with no explanation -- e.g. macOS blocking a
+        # sandboxed terminal's access to `~/Documents`.
+        self._report_load_error(self.root)
 
         # Filter/sort/rename state for the active details table.
         self.filter_text = ""           # live search query; "" narrows nothing
@@ -1206,6 +1224,7 @@ class FileManager:
         if not node.is_dir:
             return
         ensure_loaded(node)
+        self._report_load_error(node)
         subdirs = node.subdirs()
         if not node.expanded and subdirs:
             node.expanded = True
@@ -1228,6 +1247,36 @@ class FileManager:
             parent.expanded = True
             parent = parent.parent
 
+    def _report_load_error(self, node: Node) -> None:
+        """After an `ensure_loaded(node)` that may have just failed: if it
+        did, set `self.message` naming the folder and the OS's own reason
+        (`load_error_reason`), with a macOS-specific hint appended -- this
+        is exactly the shape of failure a sandboxed terminal hits reading
+        `~/Documents`/`~/Desktop`/etc on that platform. A no-op when the
+        load succeeded (or hasn't been attempted)."""
+        if node.load_error:
+            reason = node.load_error_reason or "unknown error"
+            hint = (
+                " (macOS: System Settings → Privacy & Security → Files and Folders)"
+                if sys.platform == "darwin"
+                else ""
+            )
+            self.message = f"Can't read {node.path}: {reason}{hint}"
+
+    def _show_folder_in_active_tab(self, node: Node) -> None:
+        """A tree-row click: show `node`'s listing in the details pane,
+        replacing the active tab's folder (VS Code/Finder sidebar
+        behaviour) rather than opening a new tab -- opening a new tab stays
+        a deliberate action (`_open`, via Enter / the context menu). With
+        no tab open yet, opens the first one."""
+        ensure_loaded(node)
+        self._report_load_error(node)
+        if not self.open:
+            self.open.append(node)
+            self.active_tab = 0
+            return
+        self.open[self.active_tab] = node
+
     def _open(self, node: Node | None = None) -> None:
         """Open `node` (default: the cursor) as a details tab, expanding it;
         focus its tab if already open. A file just reports itself."""
@@ -1236,6 +1285,7 @@ class FileManager:
             self.message = f"{node.name} ({_human_size(node.size_bytes)})"
             return
         ensure_loaded(node)
+        self._report_load_error(node)
         for i, existing in enumerate(self.open):
             if existing.path == node.path:
                 self.active_tab = i
@@ -1248,7 +1298,9 @@ class FileManager:
         if node.is_dir:
             node.children = None
             ensure_loaded(node)
-            self.message = f"reloaded {node.name}"
+            self._report_load_error(node)
+            if not node.load_error:
+                self.message = f"reloaded {node.name}"
 
     def _close_tab(self, index: int) -> None:
         if 0 <= index < len(self.open):
@@ -1257,15 +1309,17 @@ class FileManager:
                 self.active_tab = max(0, len(self.open) - 1)
 
     def _on_row_click(self, path: list[int]) -> None:
-        """A tree-row click: select that folder and toggle its expansion."""
+        """A tree-row click: select that folder and show it in the details
+        pane (see `_show_folder_in_active_tab`), without touching its
+        expansion state -- only the chevron (`_on_row_toggle_expand`) or
+        Left/Right (`_expand`/`_collapse`) ever expands or collapses a row,
+        so clicking around the tree is never "jumpy"."""
         rows, nodes = folder_rows(self.root)
         for idx, (row, node) in enumerate(zip(rows, nodes)):
             if row["path"] == list(path):
                 self.cursor = node
                 self._show_tree_tooltip(node, idx)
-                ensure_loaded(node)
-                if node.subdirs():
-                    node.expanded = not node.expanded
+                self._show_folder_in_active_tab(node)
                 return
 
     def _on_row_toggle_expand(self, path: list[int]) -> None:
@@ -1277,6 +1331,7 @@ class FileManager:
         for row, node in zip(rows, nodes):
             if row["path"] == list(path):
                 ensure_loaded(node)
+                self._report_load_error(node)
                 if node.subdirs():
                     node.expanded = not node.expanded
                 return
