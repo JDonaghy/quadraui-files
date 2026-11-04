@@ -48,12 +48,19 @@ def test_empty_state_header_says_no_file_selected(sample_tree):
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
 
-    assert "No file selected" in fm.app.screen()
+    screen = fm.app.screen()
+    occurrences = [y for y, line in enumerate(screen.splitlines()) if "No file selected" in line]
+    # Both the header (no selection yet) and the preview body (unchanged
+    # `preview_lines` hint) say so -- discriminate against the unchanged
+    # pre-header behaviour by requiring *both* rows, header above body.
+    assert len(occurrences) == 2, f"expected a header row and a body row saying so:\n{screen}"
+    header_y, body_y = occurrences
+    assert header_y < body_y, f"header isn't above the body hint:\n{screen}"
 
 
 def test_header_shows_name_and_size_above_the_preview_text(sample_tree):
     (sample_tree / "readme.txt").write_text("zzqMARKERzz")
-    fm = FileManager(sample_tree, width=200, height=30)  # roomy enough for the header's right segment
+    fm = FileManager(sample_tree)  # default width: the header must survive at a realistic size
     _open_root_tab(fm)
 
     _activate_child(fm, "readme.txt")
@@ -65,6 +72,22 @@ def test_header_shows_name_and_size_above_the_preview_text(sample_tree):
     content_y = _find(fm, "zzqMARKERzz")[1]
     assert name_y == size_y, f"name and size aren't on the same header line:\n{screen}"
     assert name_y < content_y, f"header isn't above the preview text:\n{screen}"
+
+
+def test_header_size_survives_at_a_narrow_width(sample_tree):
+    """The size is a left segment next to the name, so it isn't the first
+    thing a narrow preview column drops (unlike the modified time, a right
+    segment, which may legitimately disappear here)."""
+    (sample_tree / "readme.txt").write_text("zzqMARKERzz")
+    fm = FileManager(sample_tree, width=80, height=24)
+    _open_root_tab(fm)
+
+    _activate_child(fm, "readme.txt")
+
+    screen = fm.app.screen()
+    size = f"{(sample_tree / 'readme.txt').stat().st_size} B"
+    assert "readme.txt" in screen, f"name missing at width 80:\n{screen}"
+    assert size in screen, f"size missing at width 80:\n{screen}"
 
 
 def test_p_hides_the_pane_and_widens_the_details_table(sample_tree):
