@@ -1038,6 +1038,14 @@ class FileManager:
         # `SplitDividerDragged` that sets the resize pointer cursor and
         # whatever event ends the drag -- see `_dispatch`'s own doc.
         self._dragging = False
+        # The dark/light flag a `SystemThemeChanged` event most recently
+        # recorded, `None` once applied -- `_dispatch` only records it
+        # (calling `self.app.set_theme()` from inside the handler hits the
+        # same reentrant-borrow restriction as any other `QuiApp` call made
+        # mid-dispatch); `step` applies and clears it right after
+        # `self.app.step()` returns control to this top-level code. See
+        # `step`'s own doc for which callers this actually reaches live.
+        self._pending_theme_dark: bool | None = None
         # `_tree_capacity` needs these, but `_render` -- which calls it --
         # cannot query them live: `QuiApp`'s constructor below renders frame
         # 0 synchronously, before `self.app` itself exists to query, and
@@ -1106,12 +1114,29 @@ class FileManager:
         default theme and the dark status colors, both untouched, when
         `system_theme()` raises `InternalError` -- `Unsupported`, on the
         headless TUI backend with no `$COLORFGBG` set (see that method's own
-        doc)."""
+        doc).
+
+        Only ever reads the headless driver `self.app` wraps before any run
+        loop starts -- `run_tui()`/`run_native()` haven't moved this app's
+        state onto a real terminal/window backend yet at construction time,
+        so a native run's initial palette is still this TUI-only
+        `$COLORFGBG` heuristic, not the OS's own light/dark preference.
+        `_dispatch`/`step` (see their own docs) keep that palette current
+        for a `SystemThemeChanged` event, but only for a caller pumping
+        `step`/`run` itself -- a real `run_tui()`/`run_native()` session has
+        no way yet to re-read or react to the live backend's own OS theme."""
         try:
             info = self.app.system_theme()
         except InternalError:
             return
-        dark = info["dark"]
+        self._set_theme(info["dark"])
+
+    def _set_theme(self, dark: bool) -> None:
+        """Merge in the VS Code light/dark palette and pick the matching
+        status-bar colors for `dark`. Only safe to call from top-level code
+        holding no handler-dispatch borrow on `self.app` -- see
+        `_dispatch`'s and `step`'s own docs for why a `SystemThemeChanged`
+        event can't call this directly from the handler that receives it."""
         self.app.set_theme(_VSCODE_DARK_THEME if dark else _VSCODE_LIGHT_THEME)
         self._status_fg = _STATUS_DARK_FG if dark else _STATUS_LIGHT_FG
         self._status_bg = _STATUS_DARK_BG if dark else _STATUS_LIGHT_BG
@@ -1772,9 +1797,24 @@ class FileManager:
         deferred-action queue the handler may have filled (a confirm dialog, a
         context menu, a toast, an open/reveal/trash), exactly as `run_tui`'s
         own pump does, so one call leaves the app in the state a real session
-        would show."""
+        would show.
+
+        Also applies a `SystemThemeChanged` event's palette right here, now
+        that `self.app.step()` has returned control to this top-level code
+        -- `_dispatch` (see its own doc) only ever records the new dark/light
+        flag, since `self.app.set_theme()` can't be called from inside the
+        handler `self.app.step()` was still running. That means this only
+        reaches a real OS theme switch live when something -- this app's own
+        black-box suite, or any other caller pumping `step`/`run` by hand --
+        drives the app this same way; a session started via
+        `run_tui()`/`run_native()` blocks until it exits and never returns
+        control here, so it cannot react to a live OS appearance change at
+        all yet."""
         self.app.push_event(event)
         self.app.step()
+        if self._pending_theme_dark is not None:
+            self._set_theme(self._pending_theme_dark)
+            self._pending_theme_dark = None
 
     # --- render + handle -----------------------------------------------------
 
@@ -2058,6 +2098,19 @@ class FileManager:
             self._menu_target = None
             return
         if not isinstance(event, dict):
+            return
+
+        if "SystemThemeChanged" in event:
+            # Recorded only -- `self.app.set_theme()` cannot be called from
+            # in here: it hits the same reentrant-borrow restriction as
+            # every other `QuiApp` call the module doc describes, and
+            # unlike `set_cursor`/`set_tray_icon`/the file actions below,
+            # there is no deferred, handler-safe `self.actions` equivalent
+            # for a theme change to queue instead. `step` applies this
+            # once `self.app.step()` returns to its own top-level code;
+            # see that method's doc for which run loops this actually
+            # reaches live.
+            self._pending_theme_dark = event["SystemThemeChanged"]["dark"]
             return
 
         if self._dragging and "SplitDividerDragged" not in event:
