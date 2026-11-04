@@ -251,10 +251,10 @@ def test_toast_undo_still_works_while_the_filter_box_is_open(sample_tree):
     assert fm.edit_mode == "filter"  # the box itself is untouched by the click
 
 
-def test_clicking_a_filtered_row_opens_it_without_closing_the_box_first(sample_tree):
-    """A `DataTable`/`RowActivated` click is a non-key event too, so the
-    natural "find and open" flow -- type a filter, then click the matching
-    row -- works without first pressing Enter to close the box."""
+def test_double_clicking_a_filtered_row_opens_it_without_closing_the_box_first(sample_tree):
+    """A `DataTable`/`RowDoubleClicked` is a non-key event too, so the
+    natural "find and open" flow -- type a filter, then double-click the
+    matching row -- works without first pressing Enter to close the box."""
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
 
@@ -262,9 +262,9 @@ def test_clicking_a_filtered_row_opens_it_without_closing_the_box_first(sample_t
     _type(fm, "al")
     assert _listing(fm) == ["alpha"]
 
-    fm.step({"DataTable": ["fm:grid:0", {"RowActivated": {"idx": 0}}]})
+    fm.step({"DataTable": ["fm:grid:0", {"RowDoubleClicked": {"idx": 0}}]})
 
-    assert fm.edit_mode == "filter"  # the click didn't close the box
+    assert fm.edit_mode == "filter"  # the double-click didn't close the box
     assert any(f.name == "alpha" for f in fm.open)  # but it did drill in
 
 

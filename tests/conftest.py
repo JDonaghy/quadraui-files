@@ -59,11 +59,15 @@ def sample_tree(tmp_path: Path) -> Path:
 
 
 def activate_child(fm: FileManager, name: str) -> None:
-    """Click (RowActivated) the details-table row for `name` in the active
-    tab -- the way selecting a file in the listing really happens. Looks up
-    `name`'s index in the table's *painted* order (`_visible_children`),
-    not raw `folder.children`, so this still points at the right row once a
-    filter/sort is applied."""
+    """A `DataTable/RowActivated` for the details-table row `name` in the
+    active tab -- the keyboard-Enter-on-a-focused-row semantic (see
+    `app.py`'s own doc on `RowSelected` vs `RowDoubleClicked`/
+    `RowActivated`), used throughout this suite as a convenient shortcut to
+    both select `name` and queue opening it with the OS, without needing a
+    real synthesized click (see `tests/test_detail_click.py` for those).
+    Looks up `name`'s index in the table's *painted* order
+    (`_visible_children`), not raw `folder.children`, so this still points
+    at the right row once a filter/sort is applied."""
     folder = fm.open[fm.active_tab]
     idx = [c.name for c in fm._visible_children(folder)].index(name)
     fm.step({"DataTable": [f"fm:grid:{fm.active_tab}", {"RowActivated": {"idx": idx}}]})

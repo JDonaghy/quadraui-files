@@ -114,8 +114,12 @@ crash) if the typed name contains a path separator or starts with `.`: this app'
 never lists dotfiles, so renaming onto one would just make the entry vanish on the next
 refresh.
 
-Activating a file row (click or Enter) also loads it into the **preview pane**, a third
-region to the right of the details table behind its own resizable divider: a one-line
+A single click on a details-table row selects it and loads it into the **preview
+pane**; opening it with the OS's default app (or, for a folder, drilling in) needs a
+double-click, Enter/`o` once the table has focus, or the context menu's Open — a plain
+click never opens anything, so browsing the listing doesn't fire off an app per row. The
+preview pane is a third region to the right of the details table behind its own
+resizable divider: a one-line
 header names the selected file (with its size and modified time, space permitting) and
 carries a `×` close control; below it, text content renders read-only, pinned to the
 file's head, while binary or unreadable files show a short `N bytes · <type>`

@@ -40,7 +40,9 @@ Interaction (keyboard drives, mouse works too):
                expanded, descend into its first subfolder
   Left         collapse the cursored folder; if already collapsed, jump to
                its parent
-  Enter / o    open the cursored folder as a details tab (and expand it)
+  Enter / o    with the tree focused: open the cursored folder as a details
+               tab (and expand it); with the details table focused: open
+               the selected row the same way a double-click would
   r            reload the cursored folder from disk
   Delete       trash the selected file (or the cursored folder) -- after a
                Cancel/Delete confirm dialog -- and show a toast whose Undo
@@ -62,8 +64,13 @@ Interaction (keyboard drives, mouse works too):
                             expands/collapses)
   click a tree chevron     expand or collapse that row, leaving the
                             cursor/details pane untouched
-  activate a details row   drill into that subfolder, or open a file with
-                            the OS's default app for it
+  click a details row      select it: load/show it in the preview pane,
+                            without opening anything (mirrors clicking a row
+                            in Finder's/Explorer's details pane)
+  double-click a details   open: drill into that subfolder, or open a file
+    row                    with the OS's default app for it -- same as
+                            Enter/`o` once the table has focus, or the
+                            context menu's Open
   click a details header   sort every open details table by that column
                             (marked with ▲/▼ on the active header); click
                             the same header again to reverse it
@@ -315,10 +322,14 @@ def folder_rows(root: Node) -> tuple[list[dict], list[Node]]:
     return rows, nodes
 
 
-def tree_leaf(rows: list[dict], *, selected_path: list[int], scroll_offset: int) -> dict:
+def tree_leaf(
+    rows: list[dict], *, selected_path: list[int], scroll_offset: int, has_focus: bool = True
+) -> dict:
     """A layout-tree *leaf* wrapping the folders-only tree descriptor. A leaf is
     `{"id", "<kind>": <descriptor>}`; the id is unique across the whole tree.
-    `has_focus` keeps arrow keys / Enter routed here on the real backends.
+    `has_focus` keeps arrow keys / Enter routed here on the real backends --
+    `self.table_focus` is this app's single source of truth for which of the
+    tree/details-table has it, so a caller passes `not self.table_focus`.
     `scroll_offset` is the index of the first painted row -- the tree is purely
     declarative (it renders `rows[scroll_offset..]`), so the app owns it and
     advances it to keep the cursor in view; the backend derives the scrollbar
@@ -331,7 +342,7 @@ def tree_leaf(rows: list[dict], *, selected_path: list[int], scroll_offset: int)
             "selection_mode": "Single",
             "selected_path": selected_path,
             "scroll_offset": scroll_offset,
-            "has_focus": True,
+            "has_focus": has_focus,
             "style": TREE_STYLE,
         },
     }
@@ -342,9 +353,19 @@ def tree_leaf(rows: list[dict], *, selected_path: list[int], scroll_offset: int)
 # Each details tab lists the immediate children (files + subfolders) of one
 # opened folder. `width` is `{"Flex": w}` -- unitless proportional weights that
 # lay out the same on every backend, unlike `{"Fixed": n}` (surface-native
-# units: cells on TUI, *pixels* on native). Activating a row emits a
-# `DataTable/RowActivated` event whose `idx` indexes straight into the folder's
-# `children`, so a click on a subfolder row can drill into it.
+# units: cells on TUI, *pixels* on native). A single click emits
+# `DataTable/RowSelected` (select + preview only); a double-click, or Enter
+# once the table has focus, emits `RowDoubleClicked`/`RowActivated` (open --
+# drill into a subfolder, or hand a file to the OS). `idx` indexes straight
+# into the row order the table was painted with (`_visible_children`'s
+# filtered/sorted order, not necessarily raw `folder.children`).
+#
+# `selected_idx`/`has_focus` are fed back from `self.selected_file`/
+# `self.table_focus` every frame -- quadraui's own key routing (Up/Down
+# moving the selection, Enter activating it) only engages once the engine's
+# live `DataTable` state actually carries the row the last click selected;
+# `RowSelected` arriving on the handler does not, by itself, update that
+# live state the way this app's own Python model does.
 
 _SIZE_UNITS = ("B", "KB", "MB", "GB", "TB")
 
@@ -415,15 +436,19 @@ def details_table(
     children: list[Node] | None = None,
     sort_col: int = 0,
     sort_reverse: bool = False,
+    selected_idx: int | None = None,
+    has_focus: bool = False,
 ) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
     content subtree of tab `index`. `children` is the rows' display order
     (filtered/sorted by the caller); defaults to `folder.children` as-is.
-    Row order matches `children`, so a `RowActivated{idx}` maps straight
-    back to the same list the caller used to build it. `sort_col`/
+    Row order matches `children`, so a click/double-click/Enter `idx` maps
+    straight back to the same list the caller used to build it. `sort_col`/
     `sort_reverse` only drive a `▲`/`▼` marker on the active column's
     title -- the actual ordering is `children`'s, already sorted by the
-    caller."""
+    caller. `selected_idx`/`has_focus` are only meaningful on the active
+    tab's own table (see `_details_pane`); passing them lets the real
+    backends paint the current selection and route Up/Down/Enter here."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
@@ -456,7 +481,13 @@ def details_table(
                 {"cells": [_styled_text(name), _styled_text(size), _styled_text(modified)]}
             )
 
-    return {"id": table_id, "columns": columns, "rows": rows}
+    return {
+        "id": table_id,
+        "columns": columns,
+        "rows": rows,
+        "selected_idx": selected_idx,
+        "has_focus": has_focus,
+    }
 
 
 # --- selected file -> read-only preview --------------------------------------
@@ -645,7 +676,7 @@ TOOLBAR = {
         {"Action": {"id": "fm:k:move", "label": "↑↓ Move"}},
         {"Action": {"id": "fm:k:expand", "label": "→ Expand"}},
         {"Action": {"id": "fm:k:collapse", "label": "← Collapse"}},
-        {"Action": {"id": "fm:k:open", "label": "↵ Open"}},
+        {"Action": {"id": "fm:k:open", "label": "dblclick/↵ Open"}},
         {"Action": {"id": "fm:k:preview", "label": "p Preview"}},
         {"Action": {"id": "fm:k:refresh", "label": "r Refresh"}},
         {"Action": {"id": "fm:k:delete", "label": "Del Trash"}},
@@ -978,7 +1009,8 @@ class FileManager:
         self.open: list[Node] = []      # folder nodes shown as tabs, in order
         self.active_tab = 0             # index into self.open
         self.message = ""               # transient status hint
-        self.selected_file: Node | None = None  # last file activated in a details tab
+        self.selected_file: Node | None = None  # last row selected/activated in a details tab
+        self.table_focus = False        # whether the active details table (vs the tree) has focus
         # `build_root` already attempted the root's own load; surface it
         # right away rather than leaving the tree looking like an ordinary
         # empty folder with no explanation -- e.g. macOS blocking a
@@ -1427,6 +1459,7 @@ class FileManager:
         for idx, (row, node) in enumerate(zip(rows, nodes)):
             if row["path"] == list(path):
                 self.cursor = node
+                self.table_focus = False  # a tree click always hands focus back to the tree
                 self._show_tree_tooltip(node, idx)
                 self._show_folder_in_active_tab(node)
                 return
@@ -1439,6 +1472,7 @@ class FileManager:
         rows, nodes = folder_rows(self.root)
         for row, node in zip(rows, nodes):
             if row["path"] == list(path):
+                self.table_focus = False  # a tree click always hands focus back to the tree
                 ensure_loaded(node)
                 self._report_load_error(node)
                 if node.subdirs():
@@ -1451,7 +1485,7 @@ class FileManager:
         was last clicked (Name/Size/Modified, ascending or reversed). With
         no filter and the default Name/ascending sort this is exactly
         `folder.children` -- a freshly loaded folder is already sorted that
-        way -- so `RowActivated{idx}` keeps mapping straight back to it."""
+        way -- so a row's `idx` keeps mapping straight back to it."""
         children = folder.children or []
         shown = _filter_children(children, self.filter_text)
         return _sort_children(shown, self.sort_col, self.sort_reverse)
@@ -1468,17 +1502,35 @@ class FileManager:
             self.sort_col = col
             self.sort_reverse = False
 
-    def _activate_detail(self, idx: int) -> None:
-        """A details-table row was activated (clicked): drill into a subfolder,
-        or select the file and queue opening it with the OS's default app.
-        `idx` indexes the same filtered/sorted order the table was painted
-        with, not raw `folder.children`."""
+    def _select_detail(self, idx: int) -> None:
+        """A details-table row was *selected* (a single click, or Up/Down
+        navigation once the table has focus): load it into the preview pane
+        (see `_set_selected_file`) without opening anything -- a plain
+        click only ever reaches here, never `_activate_detail`. `idx`
+        indexes the same filtered/sorted order the table was painted with,
+        not raw `folder.children`."""
         if not self.open:
             return
         folder = self.open[self.active_tab]
         children = self._visible_children(folder)
         if not (0 <= idx < len(children)):
             return
+        self.table_focus = True
+        self._set_selected_file(children[idx])
+
+    def _activate_detail(self, idx: int) -> None:
+        """A details-table row was *activated* (double-click, Enter once the
+        table has focus, or the context menu's Open): drill into a
+        subfolder, or select the file and queue opening it with the OS's
+        default app. `idx` indexes the same filtered/sorted order the table
+        was painted with, not raw `folder.children`."""
+        if not self.open:
+            return
+        folder = self.open[self.active_tab]
+        children = self._visible_children(folder)
+        if not (0 <= idx < len(children)):
+            return
+        self.table_focus = True
         child = children[idx]
         if child.is_dir:
             folder.expanded = True
@@ -1489,6 +1541,24 @@ class FileManager:
             self._set_selected_file(child)
             self.message = f"opening {child.name} ({_human_size(child.size_bytes)})"
             self._open_with_os(child)
+
+    def _open_table_selection_or_cursor(self) -> None:
+        """Enter/`o`: the real backends route Enter straight to
+        `DataTable/RowActivated` once the table has focus and a row is
+        selected (see `_handle`'s `DataTable` branch) -- this only runs for
+        `o` (which the table never intercepts; see `details_table`'s own
+        doc on `data_table_key_event`) and for Enter with the table focused
+        but nothing selected yet, or the tree focused. Opens the table's
+        current selection if the table has focus and it's still listed in
+        the active tab; otherwise falls back to opening the tree cursor
+        (`_open`)."""
+        if self.table_focus and self.open:
+            folder = self.open[self.active_tab]
+            children = self._visible_children(folder)
+            if self.selected_file in children:
+                self._activate_detail(children.index(self.selected_file))
+                return
+        self._open()
 
     # --- file actions: delete/trash, open, reveal, context menu -------------
     #
@@ -1838,6 +1908,25 @@ class FileManager:
                     "lines": [_styled_text("Select a folder and press Enter to open it.")],
                 },
             }
+
+        def _grid(i: int, folder: Node) -> dict:
+            children = self._visible_children(folder)
+            is_active = i == self.active_tab
+            selected_idx = (
+                children.index(self.selected_file)
+                if is_active and self.selected_file in children
+                else None
+            )
+            return details_table(
+                folder,
+                i,
+                children=children,
+                sort_col=self.sort_col,
+                sort_reverse=self.sort_reverse,
+                selected_idx=selected_idx,
+                has_focus=is_active and self.table_focus,
+            )
+
         return {
             "id": "fm:tabs",
             "tabs": {
@@ -1851,13 +1940,7 @@ class FileManager:
                         "closable": True,
                         "content": {
                             "id": f"fm:grid:{i}",
-                            "data_table": details_table(
-                                folder,
-                                i,
-                                children=self._visible_children(folder),
-                                sort_col=self.sort_col,
-                                sort_reverse=self.sort_reverse,
-                            ),
+                            "data_table": _grid(i, folder),
                         },
                     }
                     for i, folder in enumerate(self.open)
@@ -2052,7 +2135,12 @@ class FileManager:
                 "id": "fm:split",
                 "orientation": "horizontal",  # panes side by side, vertical divider
                 "ratio": self.ratio,
-                "first": tree_leaf(rows, selected_path=selected_path, scroll_offset=self.scroll),
+                "first": tree_leaf(
+                    rows,
+                    selected_path=selected_path,
+                    scroll_offset=self.scroll,
+                    has_focus=not self.table_focus,
+                ),
                 "second": details_and_preview,
             }
         }
@@ -2164,7 +2252,11 @@ class FileManager:
 
         if "DataTable" in event:
             activation = event["DataTable"][1]
-            if "RowActivated" in activation:
+            if "RowSelected" in activation:
+                self._select_detail(activation["RowSelected"]["idx"])
+            elif "RowDoubleClicked" in activation:
+                self._activate_detail(activation["RowDoubleClicked"]["idx"])
+            elif "RowActivated" in activation:
                 self._activate_detail(activation["RowActivated"]["idx"])
             elif "HeaderClicked" in activation:
                 self._on_header_clicked(activation["HeaderClicked"]["col"])
@@ -2212,16 +2304,35 @@ class FileManager:
 
     def _on_key(self, name: str) -> None:
         self.message = ""
-        if name == "Down":
-            self._move(1)
-        elif name == "Up":
-            self._move(-1)
-        elif name == "Right":
-            self._expand()
-        elif name == "Left":
-            self._collapse()
-        elif name in ("Enter", "o"):
+        if name in ("Down", "Up", "Right", "Left"):
+            # Reaching here at all (rather than a focus-scoped `Tree`/
+            # `DataTable` event) proves the details table doesn't really
+            # have focus right now -- a focused table intercepts Up/Down
+            # into its own `RowSelected` before a plain key ever gets this
+            # far (see `details_table`'s own doc) -- so these always act on
+            # the tree cursor, and square this app's own `table_focus`
+            # bookkeeping with that reality.
+            self.table_focus = False
+            if name == "Down":
+                self._move(1)
+            elif name == "Up":
+                self._move(-1)
+            elif name == "Right":
+                self._expand()
+            else:
+                self._collapse()
+        elif name == "Enter":
+            # A focused table with a row selected already turned this into
+            # `DataTable/RowActivated` before it ever reached here (see
+            # `_handle`); reaching here means either the tree has focus, or
+            # the table does but nothing is selected yet -- the tree cursor
+            # is the only sensible target either way.
             self._open()
+        elif name == "o":
+            # The table never intercepts `o` (unlike Enter) regardless of
+            # which one has real focus, so this is the one key that still
+            # needs `table_focus` to decide between the two targets.
+            self._open_table_selection_or_cursor()
         elif name == "r":
             self._refresh()
         elif name == "Delete":
@@ -2376,9 +2487,9 @@ def _run_headless(fm: FileManager) -> None:
         _key_event(DOWN_KEY),    # cursor onto the first subfolder
         _key_event(RIGHT_KEY),   # expand it (load on demand)
         _key_event(ENTER_KEY),   # open it as a details tab
-        # Activate the first details row (a click would deliver this), drilling
-        # into it if it is a subfolder.
-        {"DataTable": ["fm:grid:0", {"RowActivated": {"idx": 0}}]},
+        # Double-click the first details row (a real double-click would
+        # deliver this), drilling into it if it is a subfolder.
+        {"DataTable": ["fm:grid:0", {"RowDoubleClicked": {"idx": 0}}]},
     ]
     for event in steps:
         fm.step(event)
