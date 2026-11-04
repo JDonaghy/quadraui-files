@@ -15,9 +15,14 @@ Layout (the `render` callback returns a *layout tree*):
     │                                      │           folder, each tab a
     │                                      │           data_table of that
     │                                      │           folder's contents
-    │                                      └─ second : a read-only preview of
+    │                                      └─ second : a split (header over
+    │                                                  content) -- a one-line
+    │                                                  header naming/sizing
     │                                                  the last file selected
-    │                                                  in a details table
+    │                                                  in a details table,
+    │                                                  over a read-only
+    │                                                  preview of it; `p`
+    │                                                  hides the whole thing
     └─ second : a live status bar (cursored folder, item count, open tabs)
 
 The tree loads lazily: only one directory level is read at a time, so you can
@@ -48,6 +53,9 @@ Interaction (keyboard drives, mouse works too):
   F2           open an inline rename box seeded with the selected file's
                (or cursored folder's) name; Enter commits a real rename on
                disk, Esc cancels
+  p            toggle the preview pane (its header and content both) on
+               or off; hiding gives its width back to the details table,
+               and the divider ratio is remembered for next time it shows
   click a tree row         select it and show it in the details pane,
                             replacing the active tab's folder (expansion is
                             untouched -- only the chevron, or Left/Right,
@@ -60,6 +68,8 @@ Interaction (keyboard drives, mouse works too):
                             (marked with ▲/▼ on the active header); click
                             the same header again to reverse it
   click a tab / its ×      switch to / close that tab
+  click the preview header's × close the preview pane (same as pressing `p`
+                            while it's shown)
   q / Escape   quit the real run loops
 
 A right-click would be the natural way to open the context menu, but the
@@ -570,6 +580,45 @@ def preview_leaf(node: Node | None, *, capacity: int) -> dict:
     }
 
 
+# --- preview header: name/size/type + a close control ------------------------
+#
+# A one-line header above the preview's own content, naming what it's
+# showing: the file name (ellipsised -- there's no char-width/pixel-width
+# metric this app can read back from either backend, see `_tooltip_payload`'s
+# own doc for the same limitation, so this is a conservative character cap
+# rather than a pixel-exact one) on the left, its size and modified time on
+# the right, same pairing `_tooltip_payload` already shows for a file. Built
+# with `status_bar` -- the same left/right-segment primitive the bottom
+# status bar already uses -- rather than `text_display`, because a
+# `StatusBarSegment` can carry an `action_id`: the close control is just a
+# segment with one set, and clicking it raises a `StatusBar`/`SegmentClicked`
+# event carrying that id back, same mechanism a closable tab's × already
+# relies on for its own `TabClosed`. No bespoke hit-testing or widget needed.
+
+PREVIEW_HEADER_CLOSE_ACTION = "fm:preview:close"
+_PREVIEW_NAME_MAX_CHARS = 40  # conservative cap; see this section's own doc
+
+
+def _ellipsize(name: str, max_chars: int = _PREVIEW_NAME_MAX_CHARS) -> str:
+    """`name` capped to `max_chars` characters, with a trailing "…" marker
+    when it had to be cut."""
+    if len(name) <= max_chars:
+        return name
+    return name[: max_chars - 1] + "…"
+
+
+def _preview_header_text(node: Node | None) -> tuple[str, str]:
+    """`(left, right)` text for the preview header: the file name (left) and
+    its size/modified time (right); `""` on the right where there's nothing
+    to say about it (no selection, or a folder -- `preview_lines` already
+    reports a folder's own size/mtime as meaningless, see its own doc)."""
+    if node is None:
+        return "No file selected", ""
+    if node.is_dir:
+        return _ellipsize(node.name), ""
+    return _ellipsize(node.name), f"{_human_size(node.size_bytes)} · {_human_mtime(node.mtime)}"
+
+
 # --- chrome: toolbar band + status bar ---------------------------------------
 #
 # The toolbar is the body's chrome, carried by a `sidebar_panel` wrapper whose
@@ -591,6 +640,7 @@ TOOLBAR = {
         {"Action": {"id": "fm:k:menu", "label": "Menu ≡"}},
         {"Action": {"id": "fm:k:search", "label": "/ or ^F Search"}},
         {"Action": {"id": "fm:k:rename", "label": "F2 Rename"}},
+        {"Action": {"id": "fm:k:preview", "label": "p Preview"}},
         {"Action": {"id": "fm:k:quit", "label": "q Quit"}},
     ],
 }
@@ -913,6 +963,7 @@ class FileManager:
         self.scroll = 0                 # index of the first painted tree row
         self.ratio = 0.3                # tree pane width fraction
         self.preview_ratio = 0.65       # details-vs-preview width fraction, within the body's second pane
+        self.preview_visible = True     # `p`/header-× toggle; preview_ratio is kept either way
         self.open: list[Node] = []      # folder nodes shown as tabs, in order
         self.active_tab = 0             # index into self.open
         self.message = ""               # transient status hint
@@ -1000,7 +1051,7 @@ class FileManager:
         # The preview pane's layout-tree leaf, cached from `self.selected_file`
         # by `_set_selected_file` -- see that method for why `_render` only
         # reads this instead of reading+decoding the file itself every frame.
-        self._preview_leaf = preview_leaf(self.selected_file, capacity=self._tree_capacity())
+        self._preview_leaf = preview_leaf(self.selected_file, capacity=self._preview_content_capacity())
         self.app = QuiApp(width, height, render=self._render)
         # Obtained here, from top-level code: `actions()` is the only way the
         # handler can reach an overlay/OS call, and it is unreachable once a
@@ -1158,9 +1209,20 @@ class FileManager:
         Named for the tree, its first caller, but the details and preview
         panes sit in that same vertical band (the nested detail/preview
         split is side-by-side, not stacked) so this doubles as their row
-        capacity too -- `_render` reuses it as the preview's line cap."""
+        capacity too -- `_preview_content_capacity` derives the preview's
+        own (one row smaller, for its header) line cap from it."""
         chrome_rows = 3 * self._chrome_line_height / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows))
+
+    def _preview_content_capacity(self) -> int:
+        """Rows available for the preview's own `text_display` content: two
+        fewer than the shared row band `_tree_capacity` measures -- one for
+        the one-line header above it, one for that header's own split
+        divider (a split reserves a row for its divider on top of whatever
+        its two panes get, same as the outer split's divider shows up as
+        its own screen row beyond the chrome/status panes it separates).
+        See `_preview_pane`'s own doc for the matching split math."""
+        return max(1, self._tree_capacity() - 2)
 
     def _refresh_preview(self) -> None:
         """Rebuild the cached preview-pane leaf from `self.selected_file`.
@@ -1169,7 +1231,7 @@ class FileManager:
         inside the render callback itself (the native backends in particular
         repaint far more often than the TUI) -- so this runs once, whenever
         the selection changes, rather than every frame."""
-        self._preview_leaf = preview_leaf(self.selected_file, capacity=self._tree_capacity())
+        self._preview_leaf = preview_leaf(self.selected_file, capacity=self._preview_content_capacity())
 
     def _set_selected_file(self, node: Node | None) -> None:
         """The one place `selected_file` is assigned, so the cached preview
@@ -1307,6 +1369,12 @@ class FileManager:
             del self.open[index]
             if self.active_tab >= len(self.open):
                 self.active_tab = max(0, len(self.open) - 1)
+
+    def _toggle_preview(self) -> None:
+        """`p`: show/hide the preview pane (its header and content both).
+        `preview_ratio` is left untouched either way, so re-showing it
+        restores the same divider position it had before."""
+        self.preview_visible = not self.preview_visible
 
     def _on_row_click(self, path: list[int]) -> None:
         """A tree-row click: select that folder and show it in the details
@@ -1732,17 +1800,81 @@ class FileManager:
             },
         }
 
-    def _segment(self, text: str, *, accent: bool = False, bold: bool = False) -> dict:
+    def _preview_header_leaf(self) -> dict:
+        """The preview column's one-line header: the file name on the left,
+        its size/modified time on the right, and a close (×) control past
+        that -- see the preview-header section's own doc for why a
+        `status_bar` fits this and how the close control actually fires."""
+        left_text, right_text = _preview_header_text(self.selected_file)
+        right_segments = []
+        if right_text:
+            right_segments.append(self._segment(f" {right_text} "))
+        right_segments.append(self._segment(" × ", action_id=PREVIEW_HEADER_CLOSE_ACTION))
+        return {
+            "id": "fm:preview_header",
+            "status_bar": {
+                "id": "fm:preview_header",
+                "left_segments": [self._segment(f" {left_text} ", bold=True)],
+                "right_segments": right_segments,
+            },
+        }
+
+    def _preview_pane(self) -> dict:
+        """The detail split's second pane: a vertical split stacking the
+        one-line header over the preview's own content, sized so the header
+        always gets exactly one row and the content gets the rest of the
+        shared row band (`_tree_capacity`) -- the same `first_min`/
+        `second_min` floor-at-a-line-count trick `_render`'s outer split
+        already uses for its own status bar, just with the fixed pane on
+        top instead of the bottom.
+
+        `total_rows` is the band `_tree_capacity` measures; `available` is
+        one row less than that, since this split (like the outer one) gets
+        its own divider row free, on top of whatever its two panes get --
+        `ratio` has to target that reduced space, not `total_rows` itself,
+        or the header would end up taller than one row. `second_min`
+        matches `_preview_content_capacity`'s own `- 2` exactly: one row
+        for the header, one for this divider."""
+        total_rows = max(3.0, float(self._tree_capacity()))
+        header_rows = 1.0
+        available = total_rows - 1.0
+        return {
+            "split": {
+                "id": "fm:preview_header_split",
+                "orientation": "vertical",  # header stacked over content
+                "ratio": header_rows / available,
+                "first_min": header_rows,
+                "second_min": available - header_rows,
+                "first": self._preview_header_leaf(),
+                "second": self._preview_leaf,
+            }
+        }
+
+    def _segment(
+        self,
+        text: str,
+        *,
+        accent: bool = False,
+        bold: bool = False,
+        action_id: str | None = None,
+    ) -> dict:
         """One `StatusBarSegment`: styled text with the colors
         `_apply_system_theme` picked for the current OS light/dark
         preference (see `_STATUS_DARK_FG`'s own doc for why this needs its
-        own instance-level colors rather than theme-driven `StyledText`)."""
-        return {
+        own instance-level colors rather than theme-driven `StyledText`).
+        `action_id`, left unset everywhere but the preview header's close
+        control, makes the segment clickable -- a click raises a
+        `StatusBar`/`SegmentClicked` event carrying it back (see the
+        preview-header section's own doc)."""
+        segment = {
             "text": text,
             "fg": self._status_accent if accent else self._status_fg,
             "bg": self._status_bg,
             "bold": bold,
         }
+        if action_id is not None:
+            segment["action_id"] = action_id
+        return segment
 
     def _status_leaf(self) -> dict:
         """The outer split's bottom pane: a live status bar showing the cursored
@@ -1798,20 +1930,29 @@ class FileManager:
         body is the resizable tree/(details|preview) split, wrapped in a
         `sidebar_panel` whose reserved slot paints the toolbar above it. The
         details and preview panes are themselves a nested resizable split, so
-        the frame is sidebar | details | preview overall. Reads only."""
+        the frame is sidebar | details | preview overall -- unless
+        `preview_visible` is off, in which case the preview (header and
+        content both) is dropped and the details pane fills that whole
+        second slot on its own, giving its width back without disturbing
+        `preview_ratio` (restored from, unchanged, the next time the
+        preview is shown again). Reads only."""
         rows, nodes = self._visible()
         cursor_index = nodes.index(self.cursor)
         selected_path = rows[cursor_index]["path"]
         self._scroll_to_cursor(cursor_index, len(rows))
-        details_and_preview = {
-            "split": {
-                "id": "fm:detail_split",
-                "orientation": "horizontal",  # details beside its preview, vertical divider
-                "ratio": self.preview_ratio,
-                "first": self._details_pane(),
-                "second": self._preview_leaf,
+        details_and_preview = (
+            {
+                "split": {
+                    "id": "fm:detail_split",
+                    "orientation": "horizontal",  # details beside its preview, vertical divider
+                    "ratio": self.preview_ratio,
+                    "first": self._details_pane(),
+                    "second": self._preview_pane(),
+                }
             }
-        }
+            if self.preview_visible
+            else self._details_pane()
+        )
         body = {
             "split": {
                 "id": "fm:split",
@@ -1932,6 +2073,12 @@ class FileManager:
                 self.active_tab = activation["TabActivated"]["index"]
             elif "TabClosed" in activation:
                 self._close_tab(activation["TabClosed"]["index"])
+        elif "StatusBar" in event:
+            activation = event["StatusBar"][1]
+            if "SegmentClicked" in activation:
+                clicked_id = activation["SegmentClicked"]["id"]
+                if clicked_id == PREVIEW_HEADER_CLOSE_ACTION:
+                    self.preview_visible = False
         elif "SplitDividerDragged" in event:
             drag = event["SplitDividerDragged"]
             # Only the two body splits are user-resizable; the outer
@@ -1978,6 +2125,8 @@ class FileManager:
             self._start_filter()
         elif name == "F2":
             self._start_rename(self._delete_candidate())
+        elif name == "p":
+            self._toggle_preview()
 
     def _on_accelerator(self, accel_id: str) -> None:
         """A registered global accelerator (C15, `ACCELERATORS`) fired --
