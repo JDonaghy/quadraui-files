@@ -4,6 +4,7 @@ the context menu, and the undo toast — all driven headlessly through
 session's pump performs per event, deferred-action drain included (see
 `app.py`'s module doc)."""
 
+import pytest
 from conftest import activate_child as _activate_child
 
 from quadraui_files import FileManager
@@ -12,10 +13,15 @@ from quadraui_files.app import (
     DOWN_KEY,
     ENTER_KEY,
     MENU_KEY,
+    UNDO_SUPPORTED,
     _key_event,
 )
 
 ESCAPE_KEY = {"Named": "Escape"}
+
+needs_undo = pytest.mark.skipif(
+    not UNDO_SUPPORTED, reason="no programmatic trash restore on this host (macOS)"
+)
 
 
 def _open_root_tab(fm: FileManager) -> None:
@@ -29,6 +35,7 @@ def test_selecting_and_opening_a_file_queues_open_path_without_raising(sample_tr
     _activate_child(fm, "readme.txt")  # select + queue `open_path` -- must not raise
     assert fm.selected_file is not None and fm.selected_file.name == "readme.txt"
     assert "readme.txt" in fm.app.screen()
+    assert fm.actions.opened == [str(sample_tree / "readme.txt")]
 
 
 def test_delete_confirm_flow_removes_file_and_shows_undo_toast(sample_tree):
@@ -50,7 +57,9 @@ def test_delete_confirm_flow_removes_file_and_shows_undo_toast(sample_tree):
     assert not (sample_tree / "readme.txt").exists(), "file wasn't actually trashed"
 
     toast_screen = fm.app.screen()
-    assert "Moved to Trash" in toast_screen and "Undo" in toast_screen
+    assert "Moved to Trash" in toast_screen
+    # The Undo affordance is offered exactly where a restore can work.
+    assert ("Undo" in toast_screen) == UNDO_SUPPORTED
 
 
 def test_delete_cancel_keeps_the_file(sample_tree):
@@ -135,6 +144,7 @@ def _click_toast_undo(fm: FileManager) -> None:
     fm.step({"ToastActionClicked": "undo"})
 
 
+@needs_undo
 def test_undo_toast_restores_the_trashed_file(sample_tree):
     """The toast's Undo really puts the path back -- on disk and in the
     listing -- not just a message saying it would."""
@@ -156,6 +166,7 @@ def test_undo_toast_restores_the_trashed_file(sample_tree):
     assert "restored readme.txt" in fm.app.screen()
 
 
+@needs_undo
 def test_undo_restores_a_trashed_folder_with_its_contents(sample_tree):
     fm = FileManager(sample_tree)
     fm.step(_key_event(DOWN_KEY))  # cursor onto alpha
@@ -169,6 +180,7 @@ def test_undo_restores_a_trashed_folder_with_its_contents(sample_tree):
     assert "alpha" in fm.app.screen(), "restored folder missing from the tree"
 
 
+@needs_undo
 def test_a_second_undo_click_is_refused_rather_than_failing_in_the_pump(sample_tree):
     """A restore of an already-restored path finds nothing in the trash and
     raises inside the event pump, where this app has no way to catch it -- so

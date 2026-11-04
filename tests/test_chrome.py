@@ -181,15 +181,22 @@ def test_delete_and_f2_accelerators_are_dropped_while_the_confirm_dialog_is_open
 # --- hover tooltips --------------------------------------------------------
 
 
+def _wide_enough_for(root) -> int:
+    """A screen width that fits a tooltip naming a path under `root`. The
+    tooltip is clipped at the screen edge, and a temp dir can be long
+    (macOS's `/private/var/folders/...` runs well past 100 columns)."""
+    return max(100, len(str(root)) + 100)
+
+
 def test_hovering_a_tree_row_shows_a_tooltip_with_its_full_path(sample_tree):
-    fm = FileManager(sample_tree)
+    fm = FileManager(sample_tree, width=_wide_enough_for(sample_tree))
     fm.step(_key_event(DOWN_KEY))  # cursor onto "alpha" -- the "hover"
     assert fm.cursor.name == "alpha"
     assert str(fm.cursor.path) in fm.app.screen()
 
 
 def test_hovering_a_details_row_shows_a_tooltip_with_path_size_and_modified_time(sample_tree):
-    fm = FileManager(sample_tree)
+    fm = FileManager(sample_tree, width=_wide_enough_for(sample_tree))
     _open_root_tab(fm)
     _activate_child(fm, "readme.txt")  # the "hover": last file activated
 

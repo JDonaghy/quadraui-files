@@ -3,10 +3,11 @@ details-table column sort -- all driven headlessly through `FileManager.step`
 (push-and-dispatch plus the deferred-action drain, same as the other suites;
 see `app.py`'s module doc)."""
 
+import pytest
 from conftest import activate_child as _select_file
 
 from quadraui_files import FileManager
-from quadraui_files.app import DELETE_KEY, ENTER_KEY, _key_event, ensure_loaded
+from quadraui_files.app import DELETE_KEY, ENTER_KEY, UNDO_SUPPORTED, _key_event, ensure_loaded
 
 ESCAPE_KEY = {"Named": "Escape"}
 BACKSPACE_KEY = {"Named": "Backspace"}
@@ -228,6 +229,7 @@ def test_f2_renaming_a_folder_updates_children_paths_too(sample_tree):
 # --- non-key events during an open filter/rename box ----------------------
 
 
+@pytest.mark.skipif(not UNDO_SUPPORTED, reason="no programmatic trash restore on this host (macOS)")
 def test_toast_undo_still_works_while_the_filter_box_is_open(sample_tree):
     """Trash a file, open the filter box before clicking the undo toast's
     button -- `_handle_edit_key` must let the non-key `ToastActionClicked`

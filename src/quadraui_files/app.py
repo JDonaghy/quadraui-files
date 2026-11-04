@@ -879,7 +879,7 @@ def _event_key(event: dict) -> str | None:
         return _key_name(pressed.get("key"))
     for wrap in ("Tree", "List", "TabBar"):
         payload = event.get(wrap)
-        if isinstance(payload, list) and len(payload) == 2 and isinstance(payload[1], dict):
+        if isinstance(payload, (list, tuple)) and len(payload) == 2 and isinstance(payload[1], dict):
             inner = payload[1].get("KeyPressed")
             if isinstance(inner, dict):
                 return _key_name(inner.get("key"))
@@ -942,6 +942,13 @@ class FileManager:
         # actually has one (`"gtk"` / `"macos"` / `"win"`, all of which
         # declare `tray: True`). `FileManager` never sets this itself either.
         self.native_tray = False
+        # Opt-in: whether there is a real terminal or window to title. The
+        # TUI backend's `set_title` writes an OSC 0/2 escape straight to
+        # stdout, so a headless run (Python driving `step`, the test suite,
+        # piped output) would get raw escapes mixed into its output.
+        # `cli.py`/this module's own `__main__` set it right before
+        # `run_tui()`/`run_native()`; `FileManager` never sets it itself.
+        self.live_title = False
         # Latches the one-time native-chrome setup `_prime_native_chrome`
         # does on the first `_handle` dispatch of whichever run loop set
         # `native_window_chrome`/`native_tray` above -- see that method's
@@ -996,23 +1003,11 @@ class FileManager:
                 # entry rather than letting it raise out of `__init__` and
                 # take every other, otherwise-fine, accelerator down with it.
                 pass
-        # Window title (C13): called directly on `self.app`, not through
-        # `self.actions` -- `__init__` is top-level code, same as
-        # `register_accelerator`/`set_theme` above, so it owns the one
-        # exclusive borrow outright rather than needing the deferred-action
-        # workaround a handler would. `_sync_window_title` (called from
-        # `_handle`) takes over from here, through `self.actions`, once a
-        # run loop owns the app. Wrapped the same defensive way as
-        # `register_accelerator` just above: `TuiBackend::set_title` writes
-        # straight to `stdout`, so a closed/console-less process (piped
-        # output, a detached subprocess, ...) can fail this the same way a
-        # bad accelerator chord fails that loop -- one failed cosmetic call
-        # should not take the whole constructor down with it.
+        # Window title (C13): only cached here, never sent -- nothing is
+        # titled until a run loop has a terminal or window to title (see
+        # `live_title`). `start_live_title` sends this initial value and
+        # `_sync_window_title` (called from `_handle`) keeps it current.
         self._title_cache = _window_title(self.cursor.path)
-        try:
-            self.app.set_title(self._title_cache)
-        except QuadrauiError:
-            pass
         # Tray icon + menu, and the represented-filename proxy icon for the
         # start folder (C13): unlike the calls above, neither is safe to
         # attempt here -- `self.app` only ever talks to the dormant headless
@@ -1051,11 +1046,24 @@ class FileManager:
         own `title=` argument from the start path."""
         return self._title_cache
 
+    def start_live_title(self) -> None:
+        """Turn on window/terminal titling and send the current title. Call
+        from top-level code right before `run_tui()` -- like
+        `register_accelerator` in `__init__`, it calls `self.app` directly,
+        which a handler cannot. `TuiBackend::set_title` writes straight to
+        stdout, so a closed or console-less stdout can make it fail; a
+        cosmetic call must not stop the app from starting."""
+        self.live_title = True
+        try:
+            self.app.set_title(self._title_cache)
+        except QuadrauiError:
+            pass
+
     def _sync_window_title(self) -> None:
         """Window title (C13), called from `_handle` after every event:
-        if the cursored folder changed since the last call, queues a
-        `set_title` -- unconditionally, `set_title` is safe on every
-        backend -- and, where `native_window_chrome` says it's safe (see
+        if the cursored folder changed since the last call, updates the
+        cached title and, once `live_title` is on, queues a `set_title`
+        (safe on every backend) and, where `native_window_chrome` says it's safe (see
         that attribute's own doc), a `set_represented_filename` for the
         same folder. A plain equality check against the cached title
         rather than tracking `self.cursor` itself, so this fires exactly
@@ -1065,6 +1073,8 @@ class FileManager:
         if title == self._title_cache:
             return
         self._title_cache = title
+        if not self.live_title:
+            return
         self.actions.set_title(title)
         if self.native_window_chrome:
             self.actions.set_represented_filename(str(self.cursor.path))
@@ -2081,12 +2091,14 @@ if __name__ == "__main__":
     # --- the only platform-specific line is the run call below --------------
     if "--tui" in flags:
         _wrap_quit(fm)  # real terminal: raw mode, live redraw on key events
+        fm.start_live_title()
         try:
             fm.app.run_tui()
         except _Quit:
             pass
     elif "--native" in flags:
         _wrap_quit(fm)  # OS window: GTK / AppKit / Win32 per the built feature
+        fm.live_title = True  # `run_native(title=...)` sets the initial one
         # Only safe to flip right here, right before the one call that
         # actually opens a real native window -- see `native_window_chrome`/
         # `native_tray`'s own docs for why this reads the *built* backend

@@ -15,9 +15,27 @@ python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"          # builds quadraui-py from the pinned quadraui commit (needs Rust + maturin)
 quadraui-files                   # headless: Python drives the loop, prints the final screen
 quadraui-files ~/some/dir --tui  # real terminal
-quadraui-files ~/some/dir --native   # native OS window (macOS/GTK/Windows per the build)
+quadraui-files ~/some/dir --native   # native OS window -- needs a native build, see below
 quadraui-files ~/some/dir --dump # descriptor dump
 ```
+
+### Native window builds
+
+A source build of quadraui-py compiles the terminal backend only: `run_native()` exists
+only when one of its native Cargo features (`macos`, `gtk`, `win`) is passed to maturin.
+`pip install -e ".[dev]"` passes none, so `--native` on that build exits with a rebuild
+hint. To enable it, rebuild quadraui with the feature for your platform (`macos` shown;
+substitute the commit pinned in `pyproject.toml`):
+
+```bash
+MATURIN_PEP517_ARGS="--features macos" pip install --force-reinstall --no-deps --no-cache-dir \
+  "quadraui @ git+https://github.com/JDonaghy/quadraui.git@<pin>#subdirectory=quadraui-py"
+python -c "from quadraui import QuiApp; print(hasattr(QuiApp, 'run_native'))"   # True
+```
+
+`--no-cache-dir` matters: pip caches the built wheel by commit, not by feature set, so
+without it pip reinstalls the terminal-only wheel it built earlier. `gtk` also needs the
+system GTK development packages.
 
 The virtualenv is not optional: `quadraui` is only ever installed into it (it is built
 from source, not pulled from PyPI), so `pytest` must run with that env active —
@@ -54,8 +72,8 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ all backends ([known limits](#known-limits)) |
 | **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
 | **Preview** | Read-only preview pane for the selected file | ✅ all backends |
-| **T3** | OS-theme match, keybindings, tooltips, notifications | planned |
-| **T4** | Window title + dirty-dot + tray + cursor shapes (native) | planned |
+| **T3** | OS-theme match, keybindings, tooltips, notifications | ✅ all backends |
+| **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
 
 ## Testing — black-box is the acceptance bar
 
