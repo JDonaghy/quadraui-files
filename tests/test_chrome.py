@@ -78,6 +78,40 @@ def test_light_theme_status_bar_colors_differ_from_dark(sample_tree, monkeypatch
     assert dark._status_bg == {"r": 30, "g": 32, "b": 48, "a": 255}
 
 
+SYSTEM_THEME_CHANGED_TO_LIGHT = {
+    "SystemThemeChanged": {
+        "dark": False,
+        "accent": None,
+        "high_contrast": False,
+        "reduce_motion": False,
+    }
+}
+
+
+def test_system_theme_changed_event_repaints_toolbar_and_status_bar(sample_tree, monkeypatch):
+    """A `SystemThemeChanged` event (dark -> light) swaps the VS Code
+    palette and the status-bar triple, proved the same way the startup
+    dark/light tests above do: the painted toolbar cell (theme-driven) and
+    the painted status-bar cell (not theme-driven, picked separately --
+    see `_STATUS_DARK_FG`'s own doc) both actually repaint, not just
+    `fm.app.theme()`'s/`fm._status_bg`'s own readback."""
+    monkeypatch.setenv("COLORFGBG", "15;0")  # system starts dark
+    fm = FileManager(sample_tree, width=60, height=20)
+    _fg, toolbar_bg_before = fm.app.cell_colors(0, 0)
+    _fg, status_bg_before = fm.app.cell_colors(0, 19)
+    assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
+
+    fm.step(SYSTEM_THEME_CHANGED_TO_LIGHT)
+
+    assert fm._pending_theme_dark is None  # applied, not just recorded
+    assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
+    assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
+    _fg, toolbar_bg_after = fm.app.cell_colors(0, 0)
+    _fg, status_bg_after = fm.app.cell_colors(0, 19)
+    assert toolbar_bg_after != toolbar_bg_before, "toolbar didn't repaint light"
+    assert status_bg_after != status_bg_before, "status bar didn't repaint light"
+
+
 # --- keybindings (C15) ---------------------------------------------------
 
 
