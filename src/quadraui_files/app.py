@@ -1702,7 +1702,16 @@ class FileManager:
         does (see `_tray_menu_items`'s own doc), so those two ids are
         checked first, independent of `self._menu_target`. Otherwise,
         run the matching action on `self._menu_target` (set when the
-        context menu was requested)."""
+        context menu was requested).
+
+        `tests/test_window_tray.py`'s tray-activation tests push this
+        event directly and pin down that it reaches here correctly --
+        whether a real native window's menu click actually enqueues it in
+        the first place is a `quadraui` backend concern (its AppKit path
+        only forces the `drawRect:` that drains a queued tray-menu
+        activation when the app's own window happens to be `keyWindow` at
+        click time -- see `quadraui::macos::tray::QuadraMenuTarget`), not
+        this app's."""
         if item_id == TRAY_MENU_OPEN_HOME_ID:
             self.actions.open_path(str(Path.home()))
             return

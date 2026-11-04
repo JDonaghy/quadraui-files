@@ -21,10 +21,12 @@ desktop session -- see this PR's description for the manual verification
 story.
 """
 
+from pathlib import Path
+
 import pytest
 
 from quadraui_files import FileManager
-from quadraui_files.app import _key_event, _window_title
+from quadraui_files.app import TRAY_MENU_OPEN_HOME_ID, TRAY_MENU_QUIT_ID, _key_event, _window_title
 
 F2_KEY = {"Named": {"F": 2}}
 ESCAPE_KEY = {"Named": "Escape"}
@@ -156,6 +158,42 @@ def test_tray_menu_and_icon_setup_never_raises_on_the_tui_backend(sample_tree):
     assert fm.native_tray is False
     fm.step(_key_event(DOWN_KEY))
     assert fm._native_chrome_primed is True
+
+
+def test_tray_open_home_activation_queues_open_path_on_the_users_home(sample_tree):
+    """(#21) The event every backend's `TrayService::set_menu`-attached menu
+    actually emits for a click is `{"ContextMenuItemActivated": <item id>}`
+    -- the same shape a right-click context menu's selection produces, and
+    the one `_on_menu_item` matches on (see its own doc). Pushing it
+    directly, the way the real AppKit/GTK/Win32 event-queue drain would
+    once it reaches `AppLogic::handle`, is this app's whole share of C13's
+    click-to-effect path: whether that event actually reaches here on a
+    real native window is a `quadraui`-side concern (binding-core's
+    `InteractionEngine`/each backend's queue-drain timing), not this
+    app's. `_NoDesktopActions` (autouse, `conftest.py`) records `open_path`
+    instead of truly opening Finder/Explorer/a file manager for every test
+    run."""
+    fm = FileManager(sample_tree, width=60, height=20)
+
+    fm.step({"ContextMenuItemActivated": TRAY_MENU_OPEN_HOME_ID})
+
+    assert fm.actions.opened == [str(Path.home())]
+    assert fm._quit_requested is False
+
+
+def test_tray_quit_activation_sets_the_quit_requested_flag(sample_tree):
+    """`_on_menu_item` cannot raise `_Quit` itself (it has no idea
+    `_wrap_quit` exists -- see that function's own doc) -- it just records
+    intent on `fm._quit_requested`, the flag `_wrap_quit`'s wrapper checks
+    after every dispatch to actually unwind `run_tui()`/`run_native()`.
+    Same `ContextMenuItemActivated` shape as the `Open home` item above,
+    just the `Quit` item's id."""
+    fm = FileManager(sample_tree, width=60, height=20)
+
+    fm.step({"ContextMenuItemActivated": TRAY_MENU_QUIT_ID})
+
+    assert fm._quit_requested is True
+    assert fm.actions.opened == []
 
 
 def test_divider_drag_sets_then_restores_the_resize_cursor(sample_tree):
