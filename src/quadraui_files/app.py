@@ -361,11 +361,15 @@ def tree_leaf(
 # filtered/sorted order, not necessarily raw `folder.children`).
 #
 # `selected_idx`/`has_focus` are fed back from `self.selected_file`/
-# `self.table_focus` every frame -- quadraui's own key routing (Up/Down
-# moving the selection, Enter activating it) only engages once the engine's
-# live `DataTable` state actually carries the row the last click selected;
+# `self.table_focus` every frame. Engine key routing to the table engages on
+# its own, from a `MouseDown` on the table moving the engine's live focused
+# id (nothing here drives that -- see `sync_forms`' "engine-level focus is
+# already an authoritative value" doc upstream); what this feedback actually
+# does is give `data_table_key_event` the `selected_idx`/row count it reads
+# off the *painted* descriptor, which Up/Down and Enter both need to resolve
+# to `RowSelected`/`RowActivated` instead of falling through unhandled.
 # `RowSelected` arriving on the handler does not, by itself, update that
-# live state the way this app's own Python model does.
+# painted state the way this app's own Python model does.
 
 _SIZE_UNITS = ("B", "KB", "MB", "GB", "TB")
 
@@ -1495,12 +1499,19 @@ class FileManager:
         current sort if it's already the active column. `sort_col`/
         `sort_reverse` are app-global, so this re-sorts every open details
         table, not just the one the click came from -- `_details_pane`
-        applies them to every tab."""
+        applies them to every tab.
+
+        The click also moves engine focus onto the table itself (it's a tab
+        stop, same as a row click), so set `table_focus` here too -- the
+        same bookkeeping `_select_detail` does -- or the next Down would move
+        the table's own selection while the frame still paints the tree as
+        focused."""
         if self.sort_col == col:
             self.sort_reverse = not self.sort_reverse
         else:
             self.sort_col = col
             self.sort_reverse = False
+        self.table_focus = True
 
     def _select_detail(self, idx: int) -> None:
         """A details-table row was *selected* (a single click, or Up/Down
@@ -1583,9 +1594,12 @@ class FileManager:
         self.actions.reveal_in_file_manager(str(node.path))
 
     def _delete_candidate(self) -> Node:
-        """What a bare Delete keystroke (or the `Menu` key) acts on: the last
-        file activated in the *current* tab, if it's still listed there,
-        else the tree cursor."""
+        """What a bare Delete keystroke (or the `Menu` key, or F2) acts on:
+        the last details-table row selected in the *current* tab -- by a
+        click, Up/Down, or an activation -- if it's still listed there, else
+        the tree cursor. Can be a folder as well as a file: a single click
+        on a folder row selects it the same as a file row does, so it
+        becomes the candidate too, same as selecting it in the tree would."""
         if self.open and self.selected_file in (self.open[self.active_tab].children or ()):
             return self.selected_file
         return self.cursor
@@ -1912,9 +1926,19 @@ class FileManager:
         def _grid(i: int, folder: Node) -> dict:
             children = self._visible_children(folder)
             is_active = i == self.active_tab
+            # Suppress both the selection and the focus feedback while the
+            # filter/rename edit box owns the keyboard. Otherwise painting
+            # `selected_idx` lets the pinned upstream's `data_table_key_event`
+            # resolve a plain Enter to `RowActivated` even though the engine's
+            # own focus is still on the table from the click that selected
+            # this row, hijacking the Enter that should commit the edit box
+            # (see `_dispatch`'s `edit_mode` branch) instead of opening the
+            # file. Real mouse clicks still reach `RowSelected`/
+            # `RowDoubleClicked` regardless of this, since those come from
+            # `HitDetail::DataTableRow`, not from the painted descriptor.
             selected_idx = (
                 children.index(self.selected_file)
-                if is_active and self.selected_file in children
+                if is_active and self.selected_file in children and not self.edit_mode
                 else None
             )
             return details_table(
@@ -1924,7 +1948,7 @@ class FileManager:
                 sort_col=self.sort_col,
                 sort_reverse=self.sort_reverse,
                 selected_idx=selected_idx,
-                has_focus=is_active and self.table_focus,
+                has_focus=is_active and self.table_focus and not self.edit_mode,
             )
 
         return {
@@ -2305,13 +2329,17 @@ class FileManager:
     def _on_key(self, name: str) -> None:
         self.message = ""
         if name in ("Down", "Up", "Right", "Left"):
-            # Reaching here at all (rather than a focus-scoped `Tree`/
-            # `DataTable` event) proves the details table doesn't really
-            # have focus right now -- a focused table intercepts Up/Down
-            # into its own `RowSelected` before a plain key ever gets this
-            # far (see `details_table`'s own doc) -- so these always act on
-            # the tree cursor, and square this app's own `table_focus`
-            # bookkeeping with that reality.
+            # A focused table only intercepts Up/Down into its own
+            # `RowSelected` (and Enter into `RowActivated`) when it has at
+            # least one row -- see `details_table`'s own doc -- so reaching
+            # here with Up/Down on a non-empty table, or with Left/Right at
+            # all (never intercepted, exactly like `o`), does not actually
+            # prove the table lost engine focus. Clearing `table_focus`
+            # regardless keeps this app's own bookkeeping matched to "the
+            # tree cursor is what these four keys act on from here down,"
+            # which is the behaviour this branch exists to give; it can
+            # lag the engine's real focus for a beat (e.g. after Up/Down on
+            # an empty/filtered-to-nothing table) until the next click.
             self.table_focus = False
             if name == "Down":
                 self._move(1)

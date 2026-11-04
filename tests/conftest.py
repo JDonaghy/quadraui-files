@@ -3,6 +3,7 @@ driven headlessly, so tests assert on the *rendered screen* of the running app
 (the acceptance bar for this repo — see README). Native-backend behavior
 (window/tray/native file ops) is verified manually, not here."""
 
+import time
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,56 @@ def sample_tree(tmp_path: Path) -> Path:
     """A root with two subfolders (alpha, beta), a file at root, and a file
     inside alpha."""
     return _make_tree(tmp_path)
+
+
+NO_MODS = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
+
+
+def click(fm: FileManager, x: float, y: float) -> None:
+    """A real synthesized `MouseDown`/`MouseUp` pair at painted coordinates
+    `(x, y)` -- a single click, the way a user's mouse reaches the app
+    (`tests/test_tree_click.py`, `tests/test_detail_click.py`)."""
+    for kind in ("MouseDown", "MouseUp"):
+        fm.app.push_event({kind: {"position": {"x": x, "y": y}, "button": "Left", "modifiers": NO_MODS}})
+        fm.app.step()
+
+
+def double_click(fm: FileManager, x: float, y: float) -> None:
+    """A real synthesized double-click at painted coordinates `(x, y)`,
+    pushed as the engine's own bare `DoubleClick` event rather than two
+    `click()`s separated by a wall-clock gap: the pinned upstream resolves
+    either to the same `RowDoubleClicked`/`ItemDoubleClicked` semantic (a
+    host synthesizing clicks, e.g. a test, is explicitly allowed to skip the
+    `MouseDown`/`MouseUp` pair that precedes one on a real backend), and this
+    form can't flake against a loaded CI box's wall-clock timing the way two
+    back-to-back `click()`s racing the double-click detection window could."""
+    fm.app.push_event({"DoubleClick": {"widget": None, "position": {"x": x, "y": y}}})
+    fm.app.step()
+
+
+# quadraui's double-click detection keys off real wall-clock time between two
+# `MouseDown`/`MouseUp` pairs, not anything carried on the event itself -- so
+# two clicks fired back-to-back (as tests otherwise would when they mean two
+# distinct single clicks) land close enough in time to coalesce into a
+# `RowDoubleClicked`/`ItemDoubleClicked` instead. A real user's two clicks
+# are never this close together; tests that click twice in a row call
+# `let_double_click_window_pass()` between them to get the same
+# single-click behaviour a real click sequence would.
+_DOUBLE_CLICK_WINDOW_S = 0.6
+
+
+def let_double_click_window_pass() -> None:
+    time.sleep(_DOUBLE_CLICK_WINDOW_S)
+
+
+def find_row(fm: FileManager, text: str) -> tuple[float, float]:
+    """(x, y) of `text`'s first occurrence on the painted screen -- clicking
+    here lands inside that row, details-table or tree alike."""
+    for y, line in enumerate(fm.app.screen().splitlines()):
+        x = line.find(text)
+        if x >= 0:
+            return float(x + 1), float(y)
+    raise AssertionError(f"{text!r} not on screen:\n{fm.app.screen()}")
 
 
 def activate_child(fm: FileManager, name: str) -> None:
