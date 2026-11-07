@@ -6,7 +6,7 @@ Layout (the `render` callback returns a *layout tree*):
 
     split (vertical: chrome + body stacked over a status bar)
     ├─ first  : sidebar_panel
-    │            ├─ toolbar : a key-legend affordance strip (reserved top slot)
+    │            ├─ toolbar : real clickable actions (reserved top slot)
     │            └─ content : split (resizable divider, draggable)
     │                          ├─ first  : a FOLDERS-ONLY tree (navigation)
     │                          └─ second : split (resizable divider, draggable)
@@ -295,12 +295,28 @@ TREE_STYLE = {
 # `_tree_capacity` measures.
 _TREE_BORDER_INSET = 1.0 if TREE_STYLE["bordered"] else 0.0
 
-# `icon` is an `Icon`: a Nerd Font `glyph` plus an ASCII/basic-Unicode
-# `fallback` the backend uses when the glyph can't render (so the TUI stays
-# legible without a Nerd Font). `color: None` lets the row's theme foreground
-# through.
-FOLDER_ICON = {"glyph": "\U0001f4c1", "fallback": "/", "color": None}  # folder
-FILE_ICON = {"glyph": "\U0001f4c4", "fallback": " ", "color": None}  # page
+# `icon` is an `Icon`: a bundled-codicon glyph plus an ASCII `fallback` the
+# backend paints instead when nerd fonts are off (so the TUI stays legible
+# without one -- its own default). The `{"codicon": name, "fallback": ...}`
+# wire shape resolves `name` against quadraui's curated codicon subset on
+# the Rust side (`Icon::codicon`'s own doc lists every name it accepts);
+# every GUI backend already appends the bundled codicon font to its text
+# fallback chain, so no asset/font setup is needed here. `color: None` lets
+# the row's theme foreground through.
+FOLDER_ICON = {"codicon": "folder", "fallback": "/", "color": None}
+FOLDER_OPEN_ICON = {"codicon": "folder-opened", "fallback": "/", "color": None}
+FILE_ICON = {"codicon": "file", "fallback": " ", "color": None}
+
+# Raw PUA codepoints for the same two codicons, straight from
+# `quadraui::codicon_names::NAMES` -- needed only because `DataTable`'s own
+# `DataRow` has no `Icon`-bearing field the way `Tree`/`Button`/toolbar rows
+# do (see `details_table`'s own doc), so the details pane's file/folder
+# marker has to be baked into the row's plain cell text instead of going
+# through `Icon::resolve`. Picked by hand here for that one case only;
+# nowhere else needs them, since everywhere an `Icon` field exists, the
+# `{"codicon": ...}` wire shape above is resolved automatically.
+_CODICON_FOLDER_GLYPH = ""
+_CODICON_FILE_GLYPH = ""
 
 
 def _styled_text(text: str) -> dict:
@@ -321,7 +337,7 @@ def folder_rows(root: Node) -> tuple[list[dict], list[Node]]:
             {
                 "path": path,
                 "indent": indent,
-                "icon": FOLDER_ICON,
+                "icon": FOLDER_OPEN_ICON if node.expanded else FOLDER_ICON,
                 "text": _styled_text(node.name),
                 "badge": None,
                 "is_expanded": node.expanded,
@@ -456,6 +472,7 @@ def details_table(
     sort_reverse: bool = False,
     selected_idx: int | None = None,
     has_focus: bool = False,
+    nerd_fonts_enabled: bool = False,
 ) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
     content subtree of tab `index`. `children` is the rows' display order
@@ -466,7 +483,13 @@ def details_table(
     title -- the actual ordering is `children`'s, already sorted by the
     caller. `selected_idx`/`has_focus` are only meaningful on the active
     tab's own table (see `_details_pane`); passing them lets the real
-    backends paint the current selection and route Up/Down/Enter here."""
+    backends paint the current selection and route Up/Down/Enter here.
+    `nerd_fonts_enabled` (`FileManager`'s own one-time-cached read of
+    `QuiApp.nerd_fonts_enabled()`, see its own doc) picks which half of
+    the folder/file codicon marker leads the Name cell: `DataRow` has no
+    `Icon`-bearing field the way `Tree`/`Button` rows do, so there is no
+    engine-side `Icon::resolve` to lean on here, and the ASCII fallback
+    marker has to be chosen by hand instead."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
@@ -491,8 +514,16 @@ def details_table(
     else:
         rows = []
         for child in shown:
-            # A trailing "/" hints the row is navigable (activate to drill in).
-            name = f"{child.name}/" if child.is_dir else child.name
+            # A trailing "/" hints the row is navigable (activate to drill in);
+            # a leading codicon marker (or its ASCII fallback, "/"/" ", off a
+            # Nerd Font) says the same thing again as an icon, same pairing
+            # the tree already does with `FOLDER_ICON`'s own fallback.
+            if child.is_dir:
+                marker = _CODICON_FOLDER_GLYPH if nerd_fonts_enabled else "/"
+                name = f"{marker} {child.name}/"
+            else:
+                marker = _CODICON_FILE_GLYPH if nerd_fonts_enabled else " "
+                name = f"{marker} {child.name}"
             size = "" if child.is_dir else _human_size(child.size_bytes)
             modified = _human_mtime(child.mtime)
             rows.append(
@@ -682,26 +713,186 @@ def _preview_header_parts(node: Node | None) -> tuple[str, str, str]:
 # --- chrome: toolbar band + status bar ---------------------------------------
 #
 # The toolbar is the body's chrome, carried by a `sidebar_panel` wrapper whose
-# reserved top slot paints it above the content on every backend. The bindings
-# don't route clicks on toolbar buttons to events yet, so it is a *key legend*
-# -- an affordance, not a control; the keyboard and the tree/table clicks drive
-# everything. The status bar is a live bottom band, rebuilt from state each
-# frame.
+# reserved top slot paints it above the content on every backend. Each button
+# below is a real `ToolbarButton::Action`: a click resolves (on every
+# backend, `quadraui-binding-core`'s `SidebarPanelHit::ToolbarButton` hit-test
+# routes it the same way everywhere) to a semantic `Toolbar`/`ButtonClicked`
+# event carrying the clicked button's own `id` -- see `_dispatch`'s `Toolbar`
+# branch and `_on_toolbar_button`, which runs the exact same handler call its
+# keyboard equivalent does. No backend branches on this: a native GUI paints
+# real `Gtk.Button`/AppKit-button chrome with hover/focus states and the
+# `tooltip` string as a native hover tooltip (delay/auto-dismiss both handled
+# by that backend's own widget toolkit, not by this app); the TUI backend
+# degrades the same descriptor to its own documented `[ icon label (key) ]`
+# cell strip per `Toolbar`'s own "Backend contract" doc -- a compact textual
+# key legend by construction, not a separate code path here.
+#
+# `spec` (a `ButtonSpec`) is set on every button -- once present it is the
+# *only* thing a backend paints (see `ToolbarButton::resolved_button_spec`'s
+# own doc: a non-`None` `spec` replaces the sibling `label`/`icon`/`tooltip`
+# fields outright rather than merging with them), so those sibling fields
+# below are left at their inert defaults. `spec.icon` is a full `Icon`
+# (`{"codicon": ..., "fallback": ...}`), not the bare glyph string the
+# legacy `icon` field takes -- the legacy field has no separate ASCII
+# fallback slot, so a codicon put there would show its own raw (unrenderable
+# off a Nerd Font) PUA char on TUI instead of degrading. `key_hint` is the
+# one field `resolved_button_spec` leaves alone regardless of `spec`, so the
+# keystroke still shows up next to the icon on every backend, TUI included.
+# Most buttons are `ButtonVariant.Icon` -- "icon-only, no label chrome", the
+# VS Code Explorer toolbar's own look -- with the full-text label living in
+# `tooltip` instead; "Move to Trash" stays labelled and `ButtonVariant.Danger`
+# so the one destructive action here reads as such at a glance, not just on
+# hover (`Danger`'s own doc: "coloured through `Theme::button_danger_bg`").
+#
+# Pure continuous navigation (the old legend's "↑↓ Move") has no single
+# click-sized action to bind, so it is dropped here rather than forced into
+# one; the module doc's own interaction list is still the complete reference
+# for keys that aren't also toolbar buttons.
+
+
+def _toolbar_action(
+    id_: str,
+    *,
+    label: str,
+    tooltip: str,
+    key_hint: str | None,
+    codicon: str | None,
+    fallback: str,
+    danger: bool = False,
+) -> dict:
+    """One `ToolbarButton::Action` entry for `TOOLBAR`, wired entirely
+    through `spec` -- see this section's own doc for why `label`/`icon`/
+    `tooltip` are set to their do-nothing defaults otherwise."""
+    if danger:
+        variant = "Danger"
+    elif codicon:
+        # `ButtonVariant.Icon` paints no label chrome at all (see its own
+        # doc), so it only makes sense paired with an actual icon --
+        # `TOOLBAR_MENU_ID` has none of the curated codicons to spare (no
+        # "more"/"kebab" glyph in `codicon_names::NAMES`), and stays
+        # `Secondary` (labelled) instead of rendering as an empty button.
+        variant = "Icon"
+    else:
+        variant = "Secondary"
+    spec = {
+        "label": label,
+        "variant": variant,
+        "icon": {"codicon": codicon, "fallback": fallback} if codicon else None,
+        "tooltip": tooltip,
+        "disabled": False,
+    }
+    return {
+        "Action": {
+            "id": id_,
+            "label": label,
+            "icon": None,
+            "key_hint": key_hint,
+            "enabled": True,
+            "is_active": False,
+            "tooltip": tooltip,
+            "spec": spec,
+        }
+    }
+
+
+TOOLBAR_EXPAND_ID = "fm:tb:expand"
+TOOLBAR_COLLAPSE_ID = "fm:tb:collapse"
+TOOLBAR_OPEN_ID = "fm:tb:open"
+TOOLBAR_PREVIEW_ID = "fm:tb:preview"
+TOOLBAR_REFRESH_ID = "fm:tb:refresh"
+TOOLBAR_DELETE_ID = "fm:tb:delete"
+TOOLBAR_MENU_ID = "fm:tb:menu"
+TOOLBAR_SEARCH_ID = "fm:tb:search"
+TOOLBAR_RENAME_ID = "fm:tb:rename"
+TOOLBAR_QUIT_ID = "fm:tb:quit"
 
 TOOLBAR = {
     "id": "fm:toolbar",
     "buttons": [
-        {"Action": {"id": "fm:k:move", "label": "↑↓ Move"}},
-        {"Action": {"id": "fm:k:expand", "label": "→ Expand"}},
-        {"Action": {"id": "fm:k:collapse", "label": "← Collapse"}},
-        {"Action": {"id": "fm:k:open", "label": "dblclick/↵ Open"}},
-        {"Action": {"id": "fm:k:preview", "label": "p Preview"}},
-        {"Action": {"id": "fm:k:refresh", "label": "r Refresh"}},
-        {"Action": {"id": "fm:k:delete", "label": "Del Trash"}},
-        {"Action": {"id": "fm:k:menu", "label": "Menu ≡"}},
-        {"Action": {"id": "fm:k:search", "label": "/ or ^F Search"}},
-        {"Action": {"id": "fm:k:rename", "label": "F2 Rename"}},
-        {"Action": {"id": "fm:k:quit", "label": "q Quit"}},
+        _toolbar_action(
+            TOOLBAR_EXPAND_ID,
+            label="Expand",
+            tooltip="Expand the cursored folder",
+            key_hint="→",
+            codicon="chevron-right",
+            fallback=">",
+        ),
+        _toolbar_action(
+            TOOLBAR_COLLAPSE_ID,
+            label="Collapse",
+            tooltip="Collapse the cursored folder",
+            key_hint="←",
+            codicon="chevron-down",
+            fallback="<",
+        ),
+        _toolbar_action(
+            TOOLBAR_OPEN_ID,
+            label="Open",
+            tooltip="Open the selection",
+            key_hint="⏎",
+            codicon="folder-opened",
+            fallback="O",
+        ),
+        "Separator",
+        _toolbar_action(
+            TOOLBAR_PREVIEW_ID,
+            label="Preview",
+            tooltip="Toggle the preview pane",
+            key_hint="p",
+            codicon="layout",
+            fallback="P",
+        ),
+        _toolbar_action(
+            TOOLBAR_REFRESH_ID,
+            label="Refresh",
+            tooltip="Reload the cursored folder",
+            key_hint="r",
+            codicon="sync",
+            fallback="R",
+        ),
+        _toolbar_action(
+            TOOLBAR_SEARCH_ID,
+            label="Search",
+            tooltip="Filter the open folders",
+            key_hint="/",
+            codicon="search",
+            fallback="/",
+        ),
+        _toolbar_action(
+            TOOLBAR_RENAME_ID,
+            label="Rename",
+            tooltip="Rename the selection",
+            key_hint="F2",
+            codicon="edit",
+            fallback="F2",
+        ),
+        _toolbar_action(
+            TOOLBAR_MENU_ID,
+            label="Menu",
+            tooltip="Open the context menu for the selection",
+            key_hint="≡",
+            codicon=None,
+            fallback="",
+        ),
+        "Separator",
+        _toolbar_action(
+            TOOLBAR_DELETE_ID,
+            label="Move to Trash",
+            tooltip="Move the selection to the Trash",
+            key_hint="Del",
+            codicon="trash",
+            fallback="DEL",
+            danger=True,
+        ),
+        "Separator",
+        _toolbar_action(
+            TOOLBAR_QUIT_ID,
+            label="Quit",
+            tooltip="Quit",
+            key_hint="q",
+            codicon="close",
+            fallback="Q",
+        ),
     ],
 }
 
@@ -1117,6 +1308,12 @@ class FileManager:
         self._chrome_line_height = 1.0
         self._viewport_height = float(height)
         self._viewport_width = float(width)
+        # Same placeholder-then-overwrite dance, for `details_table`'s
+        # codicon-vs-ASCII marker choice (see its own doc) -- `False` here
+        # matches every real backend's own frame-0 state before a
+        # `set_nerd_fonts` call, were one ever made (this app never makes
+        # one), and the TUI backend's permanent default either way.
+        self._nerd_fonts_enabled = False
         # Status-bar colors, same placeholder-then-overwrite dance as the
         # metrics above: `_apply_system_theme` (below) picks the real
         # light/dark pair from `system_theme()` right after `self.app`
@@ -1140,6 +1337,7 @@ class FileManager:
         self._line_height = self.app.line_height()
         self._chrome_line_height = self.app.chrome_line_height()
         self._viewport_width, self._viewport_height, _scale = self.app.viewport()
+        self._nerd_fonts_enabled = self.app.nerd_fonts_enabled()
         self._refresh_preview()  # frame 0 ran with the placeholder capacity above
         self._apply_system_theme()
         for accelerator in ACCELERATORS:
@@ -1801,7 +1999,20 @@ class FileManager:
             body=f'Move "{node.name}" ({kind}) to the Trash?',
             buttons=[
                 {"id": "cancel", "label": "Cancel", "is_cancel": True},
-                {"id": "delete", "label": "Delete", "is_default": True},
+                {
+                    "id": "delete",
+                    "label": "Delete",
+                    "is_default": True,
+                    # `ButtonVariant.Danger` -- see `DialogButton.spec`'s own
+                    # doc, which names exactly this button as its example.
+                    "spec": {
+                        "label": "Move to Trash",
+                        "variant": "Danger",
+                        "icon": {"codicon": "trash", "fallback": "DEL"},
+                        "tooltip": f'Move "{node.name}" to the Trash',
+                        "disabled": False,
+                    },
+                },
             ],
             severity="warning",
         )
@@ -1899,7 +2110,11 @@ class FileManager:
             "body": node.name,
         }
         if UNDO_SUPPORTED:
-            toast["actions"] = [{"id": "undo", "label": "Undo", "style": "Default"}]
+            # `ToastButton` has no `"style"` field (an earlier, pre-B3a
+            # guess at its shape that serde's default "ignore unknown
+            # fields" behavior let through silently) -- `primary` is the
+            # real field for "the one accent-styled action on this toast".
+            toast["actions"] = [{"id": "undo", "label": "Undo", "primary": True}]
         self.actions.show_toast(toast=toast)
         # Fire-and-forget (see `send_notification`'s own doc): queued right
         # behind the toast, so a trash completing while this window isn't
@@ -1982,6 +2197,7 @@ class FileManager:
                 sort_reverse=self.sort_reverse,
                 selected_idx=selected_idx,
                 has_focus=is_active and self.table_focus and not self.edit_mode,
+                nerd_fonts_enabled=self._nerd_fonts_enabled,
             )
 
         return {
@@ -2311,6 +2527,11 @@ class FileManager:
         if "ToastActionClicked" in event:
             self._on_toast_action(event["ToastActionClicked"])
             return
+        if "Toolbar" in event:
+            bar_id, toolbar_event = event["Toolbar"]
+            if bar_id == TOOLBAR["id"] and "ButtonClicked" in toolbar_event:
+                self._on_toolbar_button(toolbar_event["ButtonClicked"]["id"])
+            return
 
         key = _event_key(event)
         if key is not None:
@@ -2443,6 +2664,37 @@ class FileManager:
             self._request_delete(self._delete_candidate())
         elif accel_id in ("fm:accel:search", "fm:accel:search_cmd"):
             self._start_filter()
+
+    def _on_toolbar_button(self, button_id: str) -> None:
+        """A real `Toolbar`/`ButtonClicked` event -- a click on one of
+        `TOOLBAR`'s own buttons, routed here from `_dispatch`. Runs the
+        exact same call its keyboard equivalent runs (see `_on_key`), so a
+        toolbar click and the matching keystroke always do the same thing;
+        `TOOLBAR_QUIT_ID` is the one exception, handled the same way
+        `_on_menu_item`'s tray `Quit` item already is (see its own doc) --
+        setting the flag `_wrap_quit` checks after every dispatch, since
+        this handler itself cannot unwind a real run loop."""
+        self.message = ""
+        if button_id == TOOLBAR_EXPAND_ID:
+            self._expand()
+        elif button_id == TOOLBAR_COLLAPSE_ID:
+            self._collapse()
+        elif button_id == TOOLBAR_OPEN_ID:
+            self._open_table_selection_or_cursor()
+        elif button_id == TOOLBAR_PREVIEW_ID:
+            self._toggle_preview()
+        elif button_id == TOOLBAR_REFRESH_ID:
+            self._refresh()
+        elif button_id == TOOLBAR_DELETE_ID:
+            self._request_delete(self._delete_candidate())
+        elif button_id == TOOLBAR_MENU_ID:
+            self._request_context_menu(self._delete_candidate())
+        elif button_id == TOOLBAR_SEARCH_ID:
+            self._start_filter()
+        elif button_id == TOOLBAR_RENAME_ID:
+            self._start_rename(self._delete_candidate())
+        elif button_id == TOOLBAR_QUIT_ID:
+            self._quit_requested = True
 
 
 # --- inspection / headless helpers -------------------------------------------
