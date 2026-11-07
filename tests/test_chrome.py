@@ -103,7 +103,37 @@ def test_system_theme_changed_event_repaints_toolbar_and_status_bar(sample_tree,
 
     fm.step(SYSTEM_THEME_CHANGED_TO_LIGHT)
 
-    assert fm._pending_theme_dark is None  # applied, not just recorded
+    assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
+    assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
+    _fg, toolbar_bg_after = fm.app.cell_colors(0, 0)
+    _fg, status_bg_after = fm.app.cell_colors(0, 19)
+    assert toolbar_bg_after != toolbar_bg_before, "toolbar didn't repaint light"
+    assert status_bg_after != status_bg_before, "status bar didn't repaint light"
+
+
+def test_system_theme_changed_applies_live_through_the_real_run_loop(sample_tree, monkeypatch):
+    """The acceptance bar for F4b: unlike `fm.step()` above (which calls
+    `QuiApp.step()` itself from top-level code), this drives the app through
+    `QuiApp.run()` -- the same queued-event/deferred-action pump `run_tui()`'s
+    and `run_native()`'s own loops use internally (see `run`'s own doc) --
+    with no call back to top-level code in between. `_dispatch`'s
+    `SystemThemeChanged` branch must queue the palette switch on the
+    deferred `self.actions.set_theme` handle rather than calling
+    `self.app.set_theme()` directly (which `run`'s internal dispatch would
+    reject as a reentrant borrow), so this is the one path that actually
+    proves a real `run_tui()`/`run_native()` session -- which never hands
+    control back to this app's own top-level code -- repaints live on a
+    real OS theme switch."""
+    monkeypatch.setenv("COLORFGBG", "15;0")  # system starts dark
+    fm = FileManager(sample_tree, width=60, height=20)
+    assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
+    _fg, toolbar_bg_before = fm.app.cell_colors(0, 0)
+    _fg, status_bg_before = fm.app.cell_colors(0, 19)
+
+    fm.app.push_event(SYSTEM_THEME_CHANGED_TO_LIGHT)
+    still_running = fm.app.run(max_steps=1)
+
+    assert still_running
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
     assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
     _fg, toolbar_bg_after = fm.app.cell_colors(0, 0)
