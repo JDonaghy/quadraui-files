@@ -20,6 +20,7 @@ import pytest
 from conftest import click as _click
 from conftest import let_double_click_window_pass as _let_double_click_window_pass
 from quadraui_files import FileManager
+from quadraui_files.app import DOWN_KEY, _key_event
 
 
 def _row_icon_x(fm: FileManager, name: str) -> tuple[int, int]:
@@ -141,6 +142,75 @@ def test_root_row_stays_painted_on_screen_after_a_tree_click(tmp_path):
     _click_tree_row(fm, "alpha")
 
     assert f"/ {root_name}" in fm.app.screen()
+
+
+def test_last_folder_scrolls_into_the_bordered_trees_painted_window(tmp_path):
+    """`TreeStyle.bordered` costs the tree two painted rows (one top, one
+    bottom) that the shared row band `_tree_capacity` doesn't know about --
+    `_scroll_to_cursor` has to use `_tree_painted_capacity` instead, or the
+    scroll clamp caps two rows short and the last folders in a tree taller
+    than its pane can never reach the rows the tree actually paints."""
+    root = tmp_path / "root"
+    root.mkdir()
+    fm = FileManager(root, width=120, height=30)
+    capacity = fm._tree_capacity()
+    names = [f"d{i:02d}" for i in range(capacity + 5)]  # taller than the pane
+    for name in names:
+        (root / name).mkdir()
+    fm = FileManager(root, width=120, height=30)  # re-scan with the new folders on disk
+
+    for _ in range(len(names)):
+        fm.step(_key_event(DOWN_KEY))
+
+    assert fm.cursor.name == names[-1]
+    screen = fm.app.screen()
+    assert f"/ {names[-1]}" in screen, f"last row {names[-1]!r} not painted on screen:\n{screen}"
+
+
+def test_hovering_a_tree_row_anchors_the_tooltip_below_that_rows_own_line(tmp_path):
+    """`_show_tree_tooltip` adds `_TREE_BORDER_INSET` into the anchor it
+    hands the engine so the tooltip tracks the row's own (bordered-tree)
+    screen position, not a stale unbordered one. Pinned exactly rather than
+    just "somewhere below": the tooltip opens one line below its anchor
+    (the engine's default `Bottom` placement plus its own 1-cell margin),
+    and the tooltip box's own top border takes the first line of that, so
+    the text itself lands on `row_line + 3`. If the inset dropped back out
+    of the anchor the diff adds it to, every row's tooltip would shift up
+    by exactly one line."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "alpha").mkdir()
+    fm = FileManager(root, width=120, height=30)
+    fm.step(_key_event(DOWN_KEY))  # cursor -> "alpha", the "hover"
+    assert fm.cursor.name == "alpha"
+
+    _, row_line = _row_icon_x(fm, "alpha")
+    lines = fm.app.screen().splitlines()
+    tooltip_line = next(i for i, line in enumerate(lines) if str(fm.cursor.path) in line)
+    assert tooltip_line == row_line + 3, (
+        f"tooltip for row {row_line} painted on {tooltip_line}:\n{fm.app.screen()}"
+    )
+
+
+def test_a_long_root_name_truncates_without_breaking_the_bordered_pane(tmp_path):
+    """A name longer than the tree pane's own (now 2-columns-narrower,
+    bordered) content width must still render: clipped to a prefix, never
+    raising and never spilling past the tree's own border into the pane
+    beside it -- the kind of long-name coverage
+    `test_root_row_stays_painted_on_screen_after_a_tree_click` deliberately
+    sidesteps by using a short, fixed root name instead."""
+    long_name = "x" * 60
+    root = tmp_path / long_name
+    root.mkdir()
+    fm = FileManager(root, width=40, height=20)  # narrow enough that 60 chars can't fit
+
+    screen = fm.app.screen()
+    lines = screen.splitlines()
+    assert len({len(line) for line in lines}) == 1, f"a painted line overflowed:\n{screen}"
+
+    root_line = next(line for line in lines if "/ x" in line)
+    assert long_name not in root_line, "a too-long name should be truncated, not overflow"
+    assert "x" in root_line  # some prefix of it is still visible
 
 
 # --- unreadable folder --------------------------------------------------------

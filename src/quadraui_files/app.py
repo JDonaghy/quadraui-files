@@ -287,10 +287,12 @@ TREE_STYLE = {
 
 # The same 1-cell/pixel margin `TreeStyle.bordered` above reserves on every
 # edge of the tree's own viewport -- `TreeView::layout` applies it on the
-# Rust side to the painted rows and hit regions it hands back, but
-# `_show_tree_tooltip` below computes the tooltip's screen position itself
-# rather than reading it back from the engine, so it has to add the same
-# offset or the tooltip box drifts onto the row below the one it's for.
+# Rust side to the painted rows and hit regions it hands back, but two
+# callers have to reconstruct that same offset themselves because they don't
+# read it back from the engine: `_show_tree_tooltip` below, for the tooltip's
+# screen position, and `_tree_painted_capacity`, for how many fewer rows the
+# bordered tree paints top-and-bottom versus the unbordered row band
+# `_tree_capacity` measures.
 _TREE_BORDER_INSET = 1.0 if TREE_STYLE["bordered"] else 0.0
 
 # `icon` is an `Icon`: a Nerd Font `glyph` plus an ASCII/basic-Unicode
@@ -1298,6 +1300,18 @@ class FileManager:
         chrome_rows = 3 * self._chrome_line_height / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows))
 
+    def _tree_painted_capacity(self) -> int:
+        """Rows the tree itself actually paints, as distinct from the shared
+        row band `_tree_capacity` measures. `TreeStyle.bordered` insets the
+        tree's own viewport by `_TREE_BORDER_INSET` on *every* edge (top and
+        bottom, not just the left/right `_show_tree_tooltip` corrects for),
+        so the tree loses one painted row at each end -- two rows total --
+        that `_tree_capacity` doesn't know about because the details and
+        preview panes it also serves aren't bordered. Only `_scroll_to_cursor`
+        should use this; `_tree_capacity` itself must stay unbordered-sized
+        for its other callers."""
+        return max(1, self._tree_capacity() - 2 * int(_TREE_BORDER_INSET))
+
     def _preview_content_capacity(self) -> int:
         """Rows available for the preview's own `text_display` content: two
         fewer than the shared row band `_tree_capacity` measures -- one for
@@ -1367,7 +1381,7 @@ class FileManager:
         then clamp it so the last page never leaves a blank gap. The tree is
         declarative -- it renders `rows[scroll..]` -- so without this the view
         never follows the cursor and the scrollbar thumb never moves."""
-        capacity = self._tree_capacity()
+        capacity = self._tree_painted_capacity()
         if cursor_index < self.scroll:
             self.scroll = cursor_index
         elif cursor_index >= self.scroll + capacity:
