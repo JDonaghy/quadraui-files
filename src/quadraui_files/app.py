@@ -279,7 +279,19 @@ TREE_STYLE = {
     "chevron_expanded": "▾",  # down triangle
     "chevron_collapsed": "▸",  # right triangle
     "row_height": 22,  # px; TUI ignores it, native backends honour it
+    # Reserve a 1-cell margin so the TUI focus ring lands on that border
+    # instead of overwriting row 0 -- `TreeView::layout` insets both the
+    # painted rows and the hit regions by this margin when set.
+    "bordered": True,
 }
+
+# The same 1-cell/pixel margin `TreeStyle.bordered` above reserves on every
+# edge of the tree's own viewport -- `TreeView::layout` applies it on the
+# Rust side to the painted rows and hit regions it hands back, but
+# `_show_tree_tooltip` below computes the tooltip's screen position itself
+# rather than reading it back from the engine, so it has to add the same
+# offset or the tooltip box drifts onto the row below the one it's for.
+_TREE_BORDER_INSET = 1.0 if TREE_STYLE["bordered"] else 0.0
 
 # `icon` is an `Icon`: a Nerd Font `glyph` plus an ASCII/basic-Unicode
 # `fallback` the backend uses when the glyph can't render (so the TUI stays
@@ -1317,10 +1329,16 @@ class FileManager:
         """Hover tooltip (see that section's own doc) for tree row
         `row_index`, currently painted at `node`. Anchored exactly: this
         app owns the tree's own `scroll` offset, so the row's on-screen
-        position is fully known, not approximated."""
-        x = 0.0
-        y = self._chrome_line_height + (row_index - self.scroll) * self._line_height
-        width = max(1.0, self.ratio * self._viewport_width)
+        position is fully known, not approximated -- `_TREE_BORDER_INSET`
+        accounts for `TreeStyle.bordered` shifting row 0 down and right by
+        that same margin."""
+        x = _TREE_BORDER_INSET
+        y = (
+            self._chrome_line_height
+            + _TREE_BORDER_INSET
+            + (row_index - self.scroll) * self._line_height
+        )
+        width = max(1.0, self.ratio * self._viewport_width - 2 * _TREE_BORDER_INSET)
         self.actions.show_tooltip(
             _tooltip_payload("fm:tooltip:tree", node), (x, y, width, self._line_height)
         )

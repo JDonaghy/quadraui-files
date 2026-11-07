@@ -5,15 +5,12 @@ move this app's own scroll offset; and an unreadable folder reports why, not
 just "0 items".
 
 Most assertions here read model state (`fm.cursor`/`fm.open`/`fm.scroll`/
-`fm.message`) rather than `fm.app.screen()`: the installed quadraui build's
-Tree widget paints a focus border over the widget's own first content row
-the moment it gains focus from a mouse click (reproducible headlessly, see
-`test_root_row_hidden_by_upstream_focus_border_is_a_known_quadraui_bug`
-below) -- any row happening to be scrolled to the top, root included, is
-covered by that border regardless of this app's own (correct) scroll
-offset. Asserting against the screen for *tree-pane* content right after a
-click would make these tests depend on that unrelated, upstream rendering
-bug rather than on this file's own behavior."""
+`fm.message`) rather than `fm.app.screen()`, since model state is what
+each of these behaviors is actually about. The tree opts into
+`TreeStyle.bordered` (see `TREE_STYLE` in `app.py`), so the TUI focus ring
+a mouse click gives the tree lands on that reserved border instead of
+overwriting row 0 -- `test_root_row_stays_painted_on_screen_after_a_tree_click`
+below checks that directly against the screen."""
 
 import os
 import sys
@@ -129,17 +126,15 @@ def test_this_apps_own_scroll_offset_is_unmoved_by_a_tree_click(sample_tree):
     assert fm.scroll == 0
 
 
-@pytest.mark.xfail(
-    reason=(
-        "quadraui's Tree widget (reproducible on the headless TestBackend, "
-        "not just a real terminal) paints a focus border over its own first "
-        "content row the instant it gains focus from a mouse click, "
-        "regardless of this app's own scroll_offset -- filed upstream."
-    ),
-    strict=True,
-)
-def test_root_row_stays_painted_on_screen_after_a_tree_click(sample_tree):
-    fm = FileManager(sample_tree, width=120, height=30)
+def test_root_row_stays_painted_on_screen_after_a_tree_click(tmp_path):
+    # A fixed, short root name, unlike `sample_tree` (which hands back
+    # `tmp_path` itself, named after this test's own -- long -- node id):
+    # this test is about the root row staying painted, not about how much
+    # of a long name the narrowed, bordered tree pane can still fit.
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "alpha").mkdir()
+    fm = FileManager(root, width=120, height=30)
     root_name = fm.root.name
     assert f"/ {root_name}" in fm.app.screen()
 
