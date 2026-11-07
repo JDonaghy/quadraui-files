@@ -47,9 +47,9 @@ def test_toolbar_refresh_click_reloads_the_cursored_folder(sample_tree):
 
 def test_toolbar_delete_click_opens_the_danger_confirm_dialog(sample_tree):
     """The toolbar's "Move to Trash" button is itself `ButtonVariant.Danger`
-    (see `TOOLBAR`'s own doc), and a click on it must reach the same
-    confirm dialog `Delete`/the Menu action does -- itself carrying a
-    `ButtonVariant.Danger` `spec` (see `_request_delete`'s own doc)."""
+    (see `_toolbar`'s own doc), and a click on it must reach the same
+    confirm dialog `Delete`/the Menu action does (see `_request_delete`'s
+    own doc)."""
     fm = FileManager(sample_tree, width=160, height=20)
     fm.step(_key_event(DOWN_KEY))  # off the root -- root can't be trashed
 
@@ -60,3 +60,20 @@ def test_toolbar_delete_click_opens_the_danger_confirm_dialog(sample_tree):
         "a click on the toolbar's Move to Trash button must put up the "
         "same confirm dialog `Delete`/`_request_delete` does"
     )
+
+
+def test_toolbar_click_is_dropped_while_the_filter_box_is_open(sample_tree):
+    """`_on_toolbar_button` mirrors `_on_accelerator`'s own guard (see its
+    doc): a toolbar click reaches `_dispatch`'s `Toolbar` branch even while
+    `edit_mode` is set (unlike a plain key, `_handle_edit_key` only
+    swallows *key* events), so without the guard clicking Rename would swap
+    the in-progress filter for a rename box -- something typing `F2` into
+    the filter box itself never does (it's just appended as text)."""
+    fm = FileManager(sample_tree, width=160, height=20)
+    fm._start_filter()
+    assert fm.edit_mode == "filter"
+
+    x, y = _find_row(fm, "Rename (F2)")
+    _click(fm, x, y)
+
+    assert fm.edit_mode == "filter", "a toolbar click must not fall through while the filter box is open"
