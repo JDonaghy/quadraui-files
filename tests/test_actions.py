@@ -62,6 +62,33 @@ def test_delete_confirm_flow_removes_file_and_shows_undo_toast(sample_tree):
     assert ("Undo" in toast_screen) == UNDO_SUPPORTED
 
 
+def test_delete_dialog_button_spec_carries_a_danger_variant_matching_its_own_label(sample_tree):
+    """The confirm dialog's `delete` button spec (`_request_delete`'s own
+    doc) must keep `spec["label"]` equal to the button's own `label` --
+    the label-drift this guards against -- and carry the `Danger` variant
+    the TUI (and, per `message_dialog_options_from_buttons`, now the
+    engine generally) can paint it with."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _activate_child(fm, "readme.txt")
+
+    calls = []
+    real_show_message_dialog = fm.actions.show_message_dialog
+
+    def recording(**kwargs):
+        calls.append(kwargs)
+        return real_show_message_dialog(**kwargs)
+
+    fm.actions.show_message_dialog = recording
+
+    fm.step(_key_event(DELETE_KEY))
+
+    assert calls, "show_message_dialog was never called"
+    delete_button = next(b for b in calls[0]["buttons"] if b["id"] == "delete")
+    assert delete_button["spec"]["label"] == delete_button["label"]
+    assert delete_button["spec"]["variant"] == "Danger"
+
+
 def test_delete_cancel_keeps_the_file(sample_tree):
     fm = FileManager(sample_tree)
     _open_root_tab(fm)

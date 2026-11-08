@@ -11,7 +11,7 @@ compact textual key legend, not a separate code path here."""
 from conftest import click as _click
 from conftest import find_row as _find_row
 from quadraui_files import FileManager
-from quadraui_files.app import DOWN_KEY, _key_event
+from quadraui_files.app import DOWN_KEY, _key_event, _toolbar
 
 
 def test_toolbar_preview_click_toggles_the_preview_pane(sample_tree):
@@ -60,6 +60,27 @@ def test_toolbar_delete_click_opens_the_danger_confirm_dialog(sample_tree):
         "a click on the toolbar's Move to Trash button must put up the "
         "same confirm dialog `Delete`/`_request_delete` does"
     )
+
+
+def test_every_icon_variant_toolbar_action_carries_a_real_spec_icon():
+    """A native backend paints *only* `spec` for an `Action` that has one
+    (`quadraui/src/primitives/toolbar.rs`, through
+    `button::native_surface_paint::paint`), so a `ButtonVariant.Icon`
+    action with `spec["icon"]` left `None` would paint an empty,
+    label-less button there -- the regression this guards against (see
+    `_toolbar_action`'s own doc)."""
+    toolbar = _toolbar(nerd_fonts_enabled=False)
+    icon_actions = [
+        entry["Action"]
+        for entry in toolbar["buttons"]
+        if entry != "Separator" and entry["Action"]["spec"]["variant"] == "Icon"
+    ]
+    assert icon_actions, "expected at least one Icon-variant toolbar action"
+    for action in icon_actions:
+        assert action["spec"]["icon"] is not None, (
+            f"Icon-variant action {action['id']!r} has no spec icon -- "
+            "would paint an empty button on native"
+        )
 
 
 def test_toolbar_click_is_dropped_while_the_filter_box_is_open(sample_tree):
