@@ -45,7 +45,11 @@ def _find_header_close(fm: FileManager) -> tuple[int, int]:
 
 
 def test_empty_state_header_says_no_file_selected(sample_tree):
-    fm = FileManager(sample_tree)
+    # A realistic window, not the 100-column default -- see
+    # `test_header_shows_name_and_size_above_the_preview_text`'s own doc for
+    # why the 100-column default no longer leaves enough header budget for
+    # "No file selected" (17 characters) to survive unellipsized.
+    fm = FileManager(sample_tree, width=120)
     _open_root_tab(fm)
 
     screen = fm.app.screen()
@@ -60,7 +64,12 @@ def test_empty_state_header_says_no_file_selected(sample_tree):
 
 def test_header_shows_name_and_size_above_the_preview_text(sample_tree):
     (sample_tree / "readme.txt").write_text("zzqMARKERzz")
-    fm = FileManager(sample_tree)  # default width: the header must survive at a realistic size
+    # A realistic window, not the 100-column default: `fm:split`'s own
+    # padding and `fm:detail_split`'s own gap each cost the preview column
+    # a cell `_preview_column_width_cells` now deducts for real, and the
+    # 100-column default leaves too little budget left over for this
+    # 10-character name to survive unellipsized.
+    fm = FileManager(sample_tree, width=120)
     _open_root_tab(fm)
 
     _activate_child(fm, "readme.txt")
