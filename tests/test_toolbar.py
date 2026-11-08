@@ -65,10 +65,13 @@ def test_toolbar_delete_click_opens_the_danger_confirm_dialog(sample_tree):
 def test_every_icon_variant_toolbar_action_carries_a_real_spec_icon():
     """A native backend paints *only* `spec` for an `Action` that has one
     (`quadraui/src/primitives/toolbar.rs`, through
-    `button::native_surface_paint::paint`), so a `ButtonVariant.Icon`
-    action with `spec["icon"]` left `None` would paint an empty,
-    label-less button there -- the regression this guards against (see
-    `_toolbar_action`'s own doc)."""
+    `button::native_surface_paint::paint`). A `ButtonVariant.Icon` action
+    with `spec["icon"]` left `None` would paint nothing but the label text
+    (both rasterisers still paint `spec["label"]` whenever it's non-empty),
+    not an icon -- and leaving `spec["label"]` non-empty would paint
+    `<icon> <label>` rather than the icon-only chrome the variant implies.
+    Both are the regressions this guards against (see `_toolbar_action`'s
+    own doc)."""
     toolbar = _toolbar(nerd_fonts_enabled=False)
     icon_actions = [
         entry["Action"]
@@ -79,7 +82,12 @@ def test_every_icon_variant_toolbar_action_carries_a_real_spec_icon():
     for action in icon_actions:
         assert action["spec"]["icon"] is not None, (
             f"Icon-variant action {action['id']!r} has no spec icon -- "
-            "would paint an empty button on native"
+            "would paint only its label on native, not an icon"
+        )
+        assert action["spec"]["label"] == "", (
+            f"Icon-variant action {action['id']!r} has a non-empty spec "
+            "label -- would paint `<icon> <label>` on native instead of "
+            "icon-only chrome"
         )
 
 

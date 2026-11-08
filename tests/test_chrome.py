@@ -219,25 +219,23 @@ def test_accelerator_registration_rejecting_one_chord_does_not_raise(sample_tree
 # --- layout spacing --------------------------------------------------------
 
 
-def test_body_padding_and_gap_shift_the_details_pane_right_on_tui(tmp_path):
-    """`fm:split`'s own `padding`/`gap` (F6b) round up to whole TUI cells
-    (`_quantise_cols`'s own doc) -- the details pane's first painted
-    column must land strictly to the right of where a bare `ratio *
-    viewport_width` split (no padding, no gap) would have put it."""
+def test_body_padding_shifts_the_trees_own_border_right_on_tui(tmp_path):
+    """`fm:split`'s left-edge `padding` rounds up to exactly one whole TUI
+    column (`_quantise_cols`'s own doc, against `_PANE_PADDING_PX`). With
+    no divider in play on that edge, the unambiguous proof is the tree's
+    own `TreeStyle.bordered` border: it paints its top-left corner at
+    column 0 with no padding, so a column-1 corner here fails hard without
+    the padding key, unlike a column-count assertion a rounding difference
+    in the rasteriser could satisfy by coincidence."""
     (tmp_path / "alpha").mkdir()
     fm = FileManager(tmp_path, width=80, height=20)
-    naive_x = int(fm.ratio * fm._viewport_width)
 
     screen = fm.app.screen()
-    for line in screen.splitlines():
-        x = line.find("Select a folder")
-        if x >= 0:
-            assert x > naive_x, (
-                f"details pane text at column {x} didn't shift right of the "
-                f"no-spacing column {naive_x}:\n{screen}"
-            )
-            return
-    raise AssertionError(f"placeholder text not found on screen:\n{screen}")
+    border_line = next((line for line in screen.splitlines() if "╭" in line), None)
+    assert border_line is not None, f"no tree border corner painted on screen:\n{screen}"
+    assert border_line.index("╭") == 1, (
+        f"tree border corner didn't shift right by fm:split's padding:\n{border_line!r}"
+    )
 
 
 # --- overlay guard --------------------------------------------------------

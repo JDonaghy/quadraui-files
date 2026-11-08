@@ -720,14 +720,16 @@ def _preview_header_parts(node: Node | None) -> tuple[str, str, str]:
 # either and raises a decode error naming the key if given one (hence
 # padding the `sidebar_panel`'s own *content* split below, never the panel
 # itself). Every value is "surface-native pixels" (`quadraui_binding_core
-# ::layout::Spacing`'s own doc): unchanged on a real pixel backend (GTK/
-# macOS/Win), and rounded up to whole terminal cells on the TUI, against
-# the engine's own 8x16 nominal-cell-size fallback (`Backend::char_width`/
+# ::layout::Spacing`'s own doc): rounded up to a whole pixel on a real
+# pixel backend (GTK/macOS/Win, a no-op for the whole-pixel values this app
+# uses), and rounded up to whole terminal cells on the TUI, against the
+# engine's own 8x16 nominal-cell-size fallback (`Backend::char_width`/
 # `line_height` both report `1.0` there, not a real font measurement, so
 # they can't supply the pixel-to-cell ratio themselves). `_PANE_PADDING_PX`/
-# `_PANE_GAP_PX` are exactly that nominal cell size, so they round up to
-# exactly one TUI row/column on every edge/gap while staying a modest,
-# VS-Code-ish inset on a real pixel backend.
+# `_PANE_GAP_PX` are `8.0` -- exactly `_NOMINAL_CELL_PX_WIDTH` horizontally,
+# but half of `_NOMINAL_CELL_PX_HEIGHT` vertically -- so `math.ceil` rounds
+# both up to exactly one TUI row/column on every edge/gap either way, while
+# staying a modest, VS-Code-ish inset on a real pixel backend.
 _NOMINAL_CELL_PX_WIDTH = 8.0
 _NOMINAL_CELL_PX_HEIGHT = 16.0
 
@@ -739,11 +741,14 @@ def _quantise_cols(px: float, char_width: float) -> float:
     """How many of the viewport's own horizontal units (pixels on a real
     backend, columns on the TUI) a `padding`/`gap` wire value of `px`
     actually costs -- mirrors `quadraui_binding_core::layout
-    ::quantise_horizontal` exactly: unchanged on a pixel backend
-    (`char_width > 1.0`, a real font measurement), rounded up to a whole
-    column against `_NOMINAL_CELL_PX_WIDTH` on the TUI."""
+    ::quantise_horizontal` exactly: `math.ceil`'d to a whole pixel on a
+    pixel backend (`char_width > 1.0`, a real font measurement -- the
+    engine ceils here too, see its own doc; a no-op for the whole-pixel
+    values this app uses, but kept so the two never silently diverge for a
+    fractional one), rounded up to a whole column against
+    `_NOMINAL_CELL_PX_WIDTH` on the TUI."""
     if char_width > 1.0:
-        return px
+        return math.ceil(px)
     return math.ceil(px / _NOMINAL_CELL_PX_WIDTH)
 
 
@@ -751,7 +756,7 @@ def _quantise_rows(px: float, line_height: float) -> float:
     """`_quantise_cols`'s vertical counterpart, against `quantise_vertical`
     and `_NOMINAL_CELL_PX_HEIGHT`."""
     if line_height > 1.0:
-        return px
+        return math.ceil(px)
     return math.ceil(px / _NOMINAL_CELL_PX_HEIGHT)
 
 
@@ -790,17 +795,22 @@ def _quantise_rows(px: float, line_height: float) -> float:
 # them, and it is no longer a cosmetic no-op on native: `ButtonSpec.icon` is
 # an `Option<Icon>` (the same `{"codicon": ..., "fallback": ...}` wire shape
 # `Tree`/`Button` rows take, resolved Rust-side) and `ButtonSpec.tooltip` is
-# the tooltip string, both set below so a native backend's icon-only
-# `ButtonVariant.Icon` chrome and "Move to Trash"'s `Danger` fill paint a
-# real icon rather than an empty button. `key_hint` is not painted on
-# native once `spec` is set either way -- upstream's documented "spec is an
-# override" choice -- so the legacy fields above still carry the real
-# icon/tooltip for the TUI, which never reads `spec.icon`/`spec.tooltip`.
+# the tooltip string, both set below so a native backend paints a real icon
+# and "Move to Trash"'s `Danger` fill. `ButtonVariant.Icon` itself only drops
+# the bracket/border chrome -- both rasterisers still paint `spec["label"]`
+# right after the icon whenever it's non-empty -- so `_toolbar_action` also
+# empties `spec["label"]` for `Icon`-variant actions to get genuinely
+# icon-only native chrome, rather than `<icon> <label>`. `key_hint` is not
+# painted on native once `spec` is set either way -- upstream's documented
+# "spec is an override" choice -- so the legacy fields above still carry the
+# real icon/tooltip/label for the TUI, which never reads
+# `spec.icon`/`spec.tooltip`/`spec.label`.
 #
 # Most buttons carry `ButtonVariant.Icon` because they have a codicon to
 # show instead of a label; "Move to Trash" is `ButtonVariant.Danger` instead
-# (plus the real TUI tint it already got), and the Menu button, with no
-# curated codicon to spare, stays `Secondary` (labelled) on every backend.
+# (plus the real TUI tint it already got, and a real label since `Danger`
+# buttons keep their `spec["label"]`), and the Menu button, with no curated
+# codicon to spare, stays `Secondary` (labelled) on every backend.
 #
 # Pure continuous navigation (the old legend's "↑↓ Move") has no single
 # click-sized action to bind, so it is dropped here rather than forced into
@@ -843,10 +853,14 @@ def _toolbar_action(
     `tooltip` are the legacy fields the TUI's own toolbar painter reads (see
     this section's own doc); `spec` is what a native backend actually paints
     once it's set, so `spec["icon"]`/`spec["tooltip"]` carry the same icon
-    and tooltip the legacy fields do, not `None` -- a native backend paints
-    *only* `spec` for an action that has one, so leaving `spec["icon"]`
-    unset here would paint an empty, label-less button for every
-    `ButtonVariant.Icon` action."""
+    and tooltip the legacy fields do, not `None`. A native backend paints
+    *only* `spec` for an action that has one, and both rasterisers paint
+    `spec["label"]` right after the icon whenever it is non-empty -- there is
+    no dedicated "icon-only" chrome flag, just an empty label -- so
+    `spec["label"]` is `""` for `ButtonVariant.Icon` actions (set below,
+    deliberately not the same string as the legacy `label` field) to get the
+    icon-only chrome the issue asks for, instead of painting `<icon> <label>`
+    on native."""
     if danger:
         variant = "Danger"
     elif codicon:
@@ -858,8 +872,10 @@ def _toolbar_action(
         variant = "Icon"
     else:
         variant = "Secondary"
+    # `spec["label"]` is empty for `Icon`-variant actions (see this
+    # function's own doc for why) and otherwise matches the legacy `label`.
     spec = {
-        "label": label,
+        "label": "" if variant == "Icon" else label,
         "variant": variant,
         "icon": {"codicon": codicon, "fallback": fallback} if codicon else None,
         "tooltip": tooltip,
@@ -1629,7 +1645,7 @@ class FileManager:
         vertical band (the nested detail/preview split is side-by-side,
         not stacked) so this doubles as their row capacity too --
         `_preview_content_capacity` derives the preview's own (smaller, for
-        its header and that split's own gap) line cap from it."""
+        its header and that split's own divider) line cap from it."""
         chrome_rows = 3 * self._chrome_line_height / self._line_height
         padding_rows = 2 * _quantise_rows(_PANE_PADDING_PX, self._line_height) / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows - padding_rows))
@@ -2130,6 +2146,7 @@ class FileManager:
             return
         self._delete_target = node
         kind = "folder" if node.is_dir else "file"
+        delete_label = "Delete"
         self.actions.show_message_dialog(
             title="Move to Trash",
             body=f'Move "{node.name}" ({kind}) to the Trash?',
@@ -2137,7 +2154,7 @@ class FileManager:
                 {"id": "cancel", "label": "Cancel", "is_cancel": True},
                 {
                     "id": "delete",
-                    "label": "Delete",
+                    "label": delete_label,
                     "is_default": True,
                     # `message_dialog_options_from_buttons` now forwards
                     # `spec` into `MessageDialogButton`
@@ -2147,11 +2164,12 @@ class FileManager:
                     # native GTK/macOS/Win32 *alerts* still ignore a button
                     # spec at this pinned SHA -- an upstream per-backend
                     # fence (documented in the commit that added this
-                    # forwarding), not a bug this app can work around. Kept
-                    # equal to this button's own `label` so the two can
-                    # never silently drift apart.
+                    # forwarding), not a bug this app can work around.
+                    # `spec["label"]` shares `delete_label` with the button's
+                    # own `label` above so the two can never silently drift
+                    # apart.
                     "spec": {
-                        "label": "Delete",
+                        "label": delete_label,
                         "variant": "Danger",
                         "icon": {"codicon": "trash", "fallback": ""},
                     },
@@ -2369,8 +2387,23 @@ class FileManager:
         viewport's share left after the tree pane (`ratio`) and the
         details pane (`preview_ratio` of what's left) are taken out --
         the complementary fraction to `_show_file_tooltip`'s own details-
-        pane width."""
-        return max(1.0, (1.0 - self.ratio) * (1.0 - self.preview_ratio) * self._viewport_width)
+        pane width. Also deducts `fm:split`'s right-edge `padding` (this
+        pane is the rightmost thing on screen, so only the right edge
+        touches it) and `fm:detail_split`'s own `gap` (between it and the
+        details pane next to it), both quantised the same way
+        `_show_tree_tooltip`'s own insets are -- left out, this would
+        over-count by those two cells and budget a header name a few
+        characters longer than the column can actually paint. Still
+        doesn't account for the two splits' own divider columns, same as
+        before this pane got any padding/gap."""
+        right_padding = _quantise_cols(_PANE_PADDING_PX, self._char_width)
+        detail_gap = _quantise_cols(_PANE_GAP_PX, self._char_width)
+        return max(
+            1.0,
+            (1.0 - self.ratio) * (1.0 - self.preview_ratio) * self._viewport_width
+            - right_padding
+            - detail_gap,
+        )
 
     def _preview_header_name_max_chars(self, size_text: str) -> int:
         """How many characters the header's name segment gets before
@@ -2422,22 +2455,23 @@ class FileManager:
         the same `first_min`/`second_min` floor-at-a-line-count trick
         `_render`'s outer split already uses for its own status bar, just
         with the fixed pane on top instead of the bottom. No `padding`/
-        `gap` key here, unlike `fm:split`/`fm:detail_split` -- tried and
-        reverted: any nonzero `gap` (even `x`-only `padding`) shifts either
-        the preview's first content row into the details-row hover
-        tooltip's own auto-grown box on a long enough path, or narrows the
-        header enough to truncate the name/size segments
+        `gap` key here, unlike `fm:split`/`fm:detail_split`: a nonzero
+        `gap` (even `x`-only `padding`) would shift either the preview's
+        first content row into the details-row hover tooltip's own
+        auto-grown box on a long enough path, or narrow the header enough
+        to truncate the name/size segments
         `_preview_header_name_max_chars`/`_preview_column_width_cells`
-        budget for -- both outside this split's own row math and out of
-        this change's file scope to also fix up.
+        budget for -- both outside this split's own row math.
 
         `total_rows` is the band `_tree_capacity` measures; `available` is
         one row less than that, since this split (like the outer one) gets
         its own divider row free, on top of whatever its two panes get --
         `ratio` has to target that reduced space, not `total_rows` itself,
         or the header would end up taller than intended. `second_min`
-        matches `_preview_content_capacity`'s own `- 2` exactly: one row
-        for the header, one for this divider."""
+        matches `_preview_content_capacity`'s own `- 2` on the TUI, where
+        `header_rows` is exactly `1.0`; on a real pixel backend the two can
+        differ by a fraction of a row, since `header_rows` there is
+        `chrome_line_height / line_height` rather than a flat `1`."""
         total_rows = max(3.0, float(self._tree_capacity()))
         header_rows = self._chrome_line_height / self._line_height
         available = total_rows - 1.0
