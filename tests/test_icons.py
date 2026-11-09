@@ -44,10 +44,7 @@ def test_tree_folder_row_shows_the_folder_codicon_once_nerd_fonts_are_on(tmp_pat
 
 
 def test_details_row_shows_the_file_codicon_once_nerd_fonts_are_on(tmp_path):
-    # A fixed, short root name -- see the previous test's own doc on why;
-    # here a long one pushes the tree's own (unrelated) pseudo-hover
-    # tooltip box wide enough to overlap and truncate the details column
-    # this test asserts on.
+    # A fixed, short root name -- see the previous test's own doc on why.
     root = tmp_path / "root"
     root.mkdir()
     (root / "alpha").mkdir()
@@ -58,15 +55,12 @@ def test_details_row_shows_the_file_codicon_once_nerd_fonts_are_on(tmp_path):
 
     _enable_nerd_fonts(fm)
     # A tree-cursor move forces the repaint this assertion needs, without
-    # selecting a details row -- but it also puts up the tree's own
-    # pseudo-hover tooltip (see `_move`'s `_show_tree_tooltip` call),
-    # which can overlap/overwrite the very cells being asserted on below
-    # (it's sized off the cursored node's full absolute path). Dismissed
-    # explicitly rather than relying on "the next event auto-dismisses
-    # it" (`hide_tooltip`'s own doc): the next event here is this test's
-    # own assertion, not another `step`.
+    # selecting a details row. Unlike the old pseudo-hover, moving the
+    # keyboard cursor shows no tooltip at all now (`tests/test_tree_click.py`'s
+    # own `test_moving_the_keyboard_cursor_never_shows_a_tooltip` covers
+    # that directly), so there is nothing left here to overlap the details
+    # column this test asserts on.
     fm.step(_key_event(DOWN_KEY))
-    fm.app.hide_tooltip()
 
     assert f"{_CODICON_FILE_GLYPH} readme.txt" in fm.app.screen()
     assert f"{_CODICON_FOLDER_GLYPH} alpha/" in fm.app.screen()
