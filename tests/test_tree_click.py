@@ -167,29 +167,21 @@ def test_last_folder_scrolls_into_the_bordered_trees_painted_window(tmp_path):
     assert f"/ {names[-1]}" in screen, f"last row {names[-1]!r} not painted on screen:\n{screen}"
 
 
-def test_hovering_a_tree_row_anchors_the_tooltip_below_that_rows_own_line(tmp_path):
-    """`_show_tree_tooltip` adds `_TREE_BORDER_INSET` into the anchor it
-    hands the engine so the tooltip tracks the row's own (bordered-tree)
-    screen position, not a stale unbordered one. Pinned exactly rather than
-    just "somewhere below": the tooltip opens one line below its anchor
-    (the engine's default `Bottom` placement plus its own 1-cell margin),
-    and the tooltip box's own top border takes the first line of that, so
-    the text itself lands on `row_line + 3`. If the inset dropped back out
-    of the anchor the diff adds it to, every row's tooltip would shift up
-    by exactly one line."""
+def test_moving_the_keyboard_cursor_never_shows_a_tooltip(tmp_path):
+    """Only a real pointer hover (`MouseEntered`) ever arms a tooltip --
+    see `tests/test_tooltips.py` for that path, and `app.py`'s "chrome:
+    hover tooltips" section for the full contract. The keyboard cursor
+    (`Down`) moves `fm.cursor` the same way it always has, but must not
+    paint anything resembling the row's own tooltip text (its full path)
+    anywhere on screen."""
     root = tmp_path / "root"
     root.mkdir()
     (root / "alpha").mkdir()
     fm = FileManager(root, width=120, height=30)
-    fm.step(_key_event(DOWN_KEY))  # cursor -> "alpha", the "hover"
+    fm.step(_key_event(DOWN_KEY))
     assert fm.cursor.name == "alpha"
 
-    _, row_line = _row_icon_x(fm, "alpha")
-    lines = fm.app.screen().splitlines()
-    tooltip_line = next(i for i, line in enumerate(lines) if str(fm.cursor.path) in line)
-    assert tooltip_line == row_line + 3, (
-        f"tooltip for row {row_line} painted on {tooltip_line}:\n{fm.app.screen()}"
-    )
+    assert str(fm.cursor.path) not in fm.app.screen()
 
 
 def test_a_long_root_name_truncates_without_breaking_the_bordered_pane(tmp_path):

@@ -290,10 +290,10 @@ TREE_STYLE = {
 # edge of the tree's own viewport -- `TreeView::layout` applies it on the
 # Rust side to the painted rows and hit regions it hands back, but two
 # callers have to reconstruct that same offset themselves because they don't
-# read it back from the engine: `_show_tree_tooltip` below, for the tooltip's
-# screen position, and `_tree_painted_capacity`, for how many fewer rows the
-# bordered tree paints top-and-bottom versus the unbordered row band
-# `_tree_capacity` measures.
+# read it back from the engine: `_hover_anchor_and_payload` below, for a
+# hovered tree row's own tooltip anchor, and `_tree_painted_capacity`, for
+# how many fewer rows the bordered tree paints top-and-bottom versus the
+# unbordered row band `_tree_capacity` measures.
 _TREE_BORDER_INSET = 1.0 if TREE_STYLE["bordered"] else 0.0
 
 # `icon` is an `Icon`: a bundled-codicon glyph plus an ASCII `fallback` the
@@ -666,11 +666,10 @@ def preview_leaf(node: Node | None, *, capacity: int) -> dict:
 #
 # A one-line header above the preview's own content, naming what it's
 # showing: the file name (ellipsised -- there's no char-width/pixel-width
-# metric this app can read back from either backend, similar to why
-# `_show_file_tooltip` can't learn a `DataTable`'s own scroll offset, so
-# this is a conservative character cap rather than a pixel-exact one) and
-# its size, paired the same way `_tooltip_payload` already pairs them for a
-# file, both in the header's *left* segments -- `StatusBar`'s own layout
+# metric this app can read back from either backend, so this is a
+# conservative character cap rather than a pixel-exact one) and its size,
+# paired the same way `_tooltip_payload` already pairs them for a file,
+# both in the header's *left* segments -- `StatusBar`'s own layout
 # never drops a left segment, unlike the right half's priority-drop (see
 # `fit_right_start`'s doc at the pin), so the size survives at realistic
 # window widths instead of being the first thing dropped. The modified
@@ -778,9 +777,13 @@ def _quantise_rows(px: float, line_height: float) -> float:
 # backends) paints *only* `spec` once an action has one
 # (`quadraui/src/primitives/toolbar.rs:1209-1224`) -- `label`/`icon`/
 # `key_hint` go unread there. Neither backend paints a real toolkit widget
-# with hover/focus chrome or a native hover tooltip -- there is no
-# backend-level tooltip signal for a toolbar button at this pinned SHA (see
-# the hover-tooltips section below for the same gap on tree/details rows).
+# with hover/focus chrome, and neither reads `Action.tooltip`/`spec.tooltip`
+# for its own hover tooltip either (the host-driven path,
+# `BindingHost::drive_hover_tooltip`, only ever resolves text off a `Button`
+# leaf -- see the hover-tooltips section below). This app drives its own
+# tooltip instead, off the hit-tested `MouseEntered`/`MouseLeft` every
+# backend now dispatches for a painted toolbar button
+# (`SidebarPanelHit::ToolbarButton`), same section.
 #
 # `Action.icon` -- unlike `Tree`/`Button` rows' own `icon` field, which takes
 # the `{"codicon": ..., "fallback": ...}` `Icon` wire shape and resolves it
@@ -1027,6 +1030,22 @@ def _toolbar(nerd_fonts_enabled: bool) -> dict:
     }
 
 
+def _toolbar_tooltips(nerd_fonts_enabled: bool) -> dict[str, str]:
+    """Maps each `_toolbar` action id to its own `tooltip` string, read back
+    from `_toolbar`'s own built descriptor rather than a second hand-copied
+    table, so the hover handler (this section's own doc) can never drift
+    out of sync with what a click on the same button actually does.
+    `nerd_fonts_enabled` only ever changes which icon glyph an action's
+    `Action.icon` carries, never its `tooltip`, so any value would do here --
+    taking it as a parameter rather than hardcoding one keeps this reading
+    the exact same `_toolbar` a given frame painted."""
+    return {
+        entry["Action"]["id"]: entry["Action"]["tooltip"]
+        for entry in _toolbar(nerd_fonts_enabled)["buttons"]
+        if isinstance(entry, dict) and "Action" in entry
+    }
+
+
 # `StatusBarSegment` requires explicit fg + bg (unlike the theme-driven
 # `StyledText` spans elsewhere, `set_theme` never touches it) -- so the status
 # bar needs its own light/dark pair, picked by `_apply_system_theme` from the
@@ -1155,32 +1174,76 @@ ACCELERATORS = [
 
 # --- chrome: hover tooltips ---------------------------------------------------
 #
-# A tooltip describing the file/folder the user's attention is currently on:
-# its full path, plus (for a file) a human size and modified time.
-# `quadraui`'s event model has no mouse-hover primitive this app can reach --
-# `MouseMoved` is delivered with no hit-testing against the painted layout
-# (unlike `MouseDown`/`MouseUp`/`DoubleClick`/`Scroll`, which all resolve to a
-# `"hit"` detail or a semantic `Tree`/`DataTable` event), and the TUI
-# backend -- the one the black-box suite drives -- never emits
-# `MouseEntered`/`MouseLeft` either (crossterm surfaces no such signal). So
-# "hover" here is the row the keyboard cursor is on (the tree) or the file
-# last activated in a details table (`self.selected_file`) -- the same two
-# notions of "the thing the user means right now" `_delete_candidate` already
-# keys its own target off. Shown via `self.actions.show_tooltip` (not
-# `QuiApp.show_tooltip`, which raises "already borrowed" inside a handler --
-# see the module doc), from `_move`/`_on_row_click` (tree) and
-# `_set_selected_file` (details).
+# A real pointer-hover tooltip on the toolbar, the tree and the details
+# table, with a delay before it appears and an automatic dismiss both on
+# pointer-leave and after it has sat idle a while -- VS Code's own hover
+# card contract. `InteractionEngine::handle` hit-tests every `MouseMoved`
+# against the painted layout and synthesizes a `MouseEntered`/`MouseLeft`
+# pair around a change, each carrying the hit widget's own id and a `"hit"`
+# detail (`TreeRow{row}`, `DataTableRow{row}`, `SidebarPanelToolbarButton
+# {bar}` -- this app's toolbar is the `sidebar_panel`'s own reserved slot,
+# see that section's doc) -- real per-backend plumbing, not something this
+# app derives itself; see `quadraui-binding-core/src/engine.rs`'s own doc on
+# that synthesis.
+#
+# Neither `Action.tooltip`/`spec.tooltip` nor the host's own
+# `BindingHost::drive_hover_tooltip` cover any of that: the host only ever
+# resolves hover text off a single static `button` slot or a `Button` leaf
+# (quadraui#2217), and this app has neither -- so the app drives its own
+# tooltip, the same `self.actions.show_tooltip`/`hide_tooltip` contract
+# `quadraui-py/tests/test_tooltips.py`'s
+# `test_handler_shows_and_hides_its_own_tooltip_via_actions` exercises for a
+# bare `Button` with no `tooltip` of its own. Not `QuiApp.show_tooltip`/
+# `hide_tooltip` directly -- either raises "already borrowed" called from
+# inside a handler, see the module doc -- and not a deferred `hide_tooltip`
+# queued eagerly either: the delay before showing, and the window before
+# auto-dismissing, both need to survive past the one dispatch that queues
+# them, which only `QuiAppWaker.post_after` (obtained once, up front, as
+# `self.waker` -- the same "obtained once" story `self.actions` already
+# has) can arrange:
+#
+#   * `_on_hover_entered` resolves the hit into a `_hover` target (one of
+#     "toolbar"/"tree"/"details", keyed by action id or row) and arms
+#     `self.waker.post_after(delay_ms, ...)` carrying a generation token
+#     (`_hover_gen`) -- `tooltip_delay_ms` off `QuiApp.style()`, VS Code's
+#     own 500ms if that key is ever absent.
+#   * `_on_hover_left`, or a later `_on_hover_entered` for a different
+#     target, bumps `_hover_gen` and calls `self.actions.hide_tooltip()`
+#     right away -- bumping the token is what stops a stale timer, already
+#     in flight for whatever was hovered before, from showing a tooltip for
+#     a target the pointer has since left.
+#   * When a timer fires, it arrives back on `_handle` as a `{"User":
+#     {"fm_tooltip": ..., "gen": ...}}` event (`QuiAppWaker.post_after`'s
+#     own delivery contract) -- `_on_hover_timer` only acts if `gen` still
+#     matches `_hover_gen`, i.e. nothing has re-armed or cancelled it
+#     since. A matching "show" calls `self.actions.show_tooltip` from
+#     `_hover_anchor_and_payload` and arms a second `post_after` for the
+#     fixed auto-dismiss window (`_TOOLTIP_AUTO_DISMISS_MS`, VS Code-like --
+#     about 5s); a matching "hide" is that window elapsing with the same
+#     hover still live, and just calls `self.actions.hide_tooltip()`.
+#
+# The keyboard cursor (`_move`) and a details-table row click/activation no
+# longer show a tooltip at all -- only a real pointer hover does, so the
+# tooltip never follows the keyboard the way the old pseudo-hover did.
 #
 # `anchor` is a `(x, y, width, height)` rect in this app's own cell grid --
 # the same units `line_height`/`chrome_line_height`/`viewport` already
-# measure for `_tree_capacity`. It is a best-effort placement, not a
-# pixel-exact hit-test (this app has no way to ask the backend for one --
-# see above): exact for a tree row (this app owns the tree's scroll
-# offset), approximate for a details row (a `DataTable`'s own scroll offset
-# is backend-owned and never reported back). `Tooltip::layout` clamps/flips
-# the result to stay inside the viewport either way, so an approximate
-# anchor never overflows or crashes -- it just occasionally sits a row or
-# two off the exact one.
+# measure for `_tree_capacity`. The tree row case is exact (this app owns
+# the tree's own `scroll` offset); the details row case is now exact too,
+# anchored off the actual pointer position carried on the `MouseMoved` that
+# the engine always dispatches right after a `MouseEntered`
+# (`_on_hover_moved` records it) -- this app still has no way to learn a
+# `DataTable`'s own backend-owned scroll offset, but it no longer needs to,
+# since the pointer's own screen position already says where the row is.
+# The toolbar case has no row/button rect to read back either, so it
+# anchors off that same recorded pointer position, one cell wide.
+# `Tooltip::layout` clamps/flips the result to stay inside the viewport
+# regardless, so an off-by-a-cell anchor never overflows or crashes.
+
+_DEFAULT_TOOLTIP_DELAY_MS = 500  # VS Code's own hover-card delay; used if `Style.tooltip_delay_ms` is unset
+_TOOLTIP_AUTO_DISMISS_MS = 5000  # VS Code-like: hide a still-hovered tooltip after this long with no change
+_TOOLTIP_SHOW = "show"
+_TOOLTIP_HIDE = "hide"
 
 
 def _tooltip_payload(widget_id: str, node: Node) -> dict:
@@ -1446,6 +1509,16 @@ class FileManager:
         # `set_nerd_fonts` call, were one ever made (this app never makes
         # one), and the TUI backend's permanent default either way.
         self._nerd_fonts_enabled = False
+        # Hover-tooltip state (see that section's own doc). `_hover` is the
+        # current pointer target (`None` when nothing is hovered); `_hover_gen`
+        # is the generation token every armed `post_after` timer carries, so
+        # a later hover change can invalidate one still in flight.
+        # `_tooltip_delay_ms` is placeholder-then-overwrite like the metrics
+        # above -- `QuiApp.style()` can't be read before `self.app` exists.
+        self._hover: dict | None = None
+        self._hover_pointer: tuple[float, float] | None = None
+        self._hover_gen = 0
+        self._tooltip_delay_ms = _DEFAULT_TOOLTIP_DELAY_MS
         # Status-bar colors, same placeholder-then-overwrite dance as the
         # metrics above: `_apply_system_theme` (below) picks the real
         # light/dark pair from `system_theme()` right after `self.app`
@@ -1465,12 +1538,18 @@ class FileManager:
         # handler can reach an overlay/OS call, and it is unreachable once a
         # run loop owns the app. See the module doc.
         self.actions = self.app.actions()
+        # Obtained here too, same "once, from top-level code, shared with
+        # the handler" story `self.actions` has: `_on_hover_entered` posts
+        # the delayed show/auto-dismiss timers this section's own doc
+        # describes through this handle.
+        self.waker = self.app.waker()
         self.app.set_handler(self._handle)
         self._line_height = self.app.line_height()
         self._chrome_line_height = self.app.chrome_line_height()
         self._char_width = self.app.char_width()
         self._viewport_width, self._viewport_height, _scale = self.app.viewport()
         self._nerd_fonts_enabled = self.app.nerd_fonts_enabled()
+        self.refresh_tooltip_delay()
         self._refresh_preview()  # frame 0 ran with the placeholder capacity above
         self._apply_system_theme()
         for accelerator in ACCELERATORS:
@@ -1628,7 +1707,6 @@ class FileManager:
         i = nodes.index(self.cursor)
         new_i = max(0, min(len(nodes) - 1, i + delta))
         self.cursor = nodes[new_i]
-        self._show_tree_tooltip(self.cursor, new_i)
 
     def _tree_capacity(self) -> int:
         """Painted rows that fit in the body's row band: the app's measured
@@ -1654,8 +1732,8 @@ class FileManager:
         """Rows the tree itself actually paints, as distinct from the shared
         row band `_tree_capacity` measures. `TreeStyle.bordered` insets the
         tree's own viewport by `_TREE_BORDER_INSET` on *every* edge (top and
-        bottom, not just the left/right `_show_tree_tooltip` corrects for),
-        so the tree loses one painted row at each end -- two rows total --
+        bottom, not just the left/right `_hover_anchor_and_payload` corrects
+        for), so the tree loses one painted row at each end -- two rows total --
         that `_tree_capacity` doesn't know about because the details and
         preview panes it also serves aren't bordered. Only `_scroll_to_cursor`
         should use this; `_tree_capacity` itself must stay unbordered-sized
@@ -1686,60 +1764,148 @@ class FileManager:
         leaf above never goes stale."""
         self.selected_file = node
         self._refresh_preview()
-        if node is not None:
-            self._show_file_tooltip(node)
 
-    def _show_tree_tooltip(self, node: Node, row_index: int) -> None:
-        """Hover tooltip (see that section's own doc) for tree row
-        `row_index`, currently painted at `node`. Anchored exactly: this
-        app owns the tree's own `scroll` offset, so the row's on-screen
-        position is fully known, not approximated -- `_TREE_BORDER_INSET`
-        accounts for `TreeStyle.bordered` shifting row 0 down and right by
-        that same margin, and `top_inset`/`left_inset` account for
-        `fm:split`'s own `padding` shifting the whole body (tree included)
-        down and right by that much more, quantised the same way the
-        engine quantises it on this backend (`_quantise_rows`/
-        `_quantise_cols`'s own doc)."""
-        top_inset = _quantise_rows(_PANE_PADDING_PX, self._line_height)
-        left_inset = _quantise_cols(_PANE_PADDING_PX, self._char_width)
-        x = left_inset + _TREE_BORDER_INSET
-        y = (
-            self._chrome_line_height
-            + top_inset
-            + _TREE_BORDER_INSET
-            + (row_index - self.scroll) * self._line_height
-        )
-        width = max(1.0, self.ratio * self._viewport_width - 2 * _TREE_BORDER_INSET - left_inset)
-        self.actions.show_tooltip(
-            _tooltip_payload("fm:tooltip:tree", node), (x, y, width, self._line_height)
+    # --- hover tooltips (see that section's own doc) -------------------------
+
+    def refresh_tooltip_delay(self) -> None:
+        """Re-reads `Style.tooltip_delay_ms` off `self.app.style()` into
+        `_tooltip_delay_ms` -- VS Code's own 500ms default if that key is
+        ever absent or non-positive. `__init__` calls this once up front;
+        top-level code that calls `self.app.set_style(...)` afterwards
+        (e.g. a test shortening the delay, same real-short-sleep pattern
+        `quadraui-py/tests/test_tooltips.py` uses) calls this right after
+        to make a later hover observe the new value -- `_on_hover_entered`
+        itself cannot read `self.app.style()` fresh every time it arms a
+        timer, since it runs from inside a handler, where any further call
+        on `self.app` hits the same "already borrowed" wall the module doc
+        describes for every other overlay/OS call."""
+        delay = self.app.style().get("tooltip_delay_ms")
+        self._tooltip_delay_ms = (
+            int(delay) if isinstance(delay, (int, float)) and delay > 0 else _DEFAULT_TOOLTIP_DELAY_MS
         )
 
-    def _show_file_tooltip(self, node: Node) -> None:
-        """Hover tooltip (see that section's own doc) for a details-table
-        row that just became `node`. Anchored near the top of the details
-        pane rather than at the row's own position: unlike the tree, this
-        app never learns a `DataTable`'s own (backend-owned) scroll offset,
-        so there is no way to know which screen row `node` actually painted
-        on. The details pane's own width is `preview_ratio`'s fraction of
-        the body's second split only while the preview is actually showing
-        and that split exists at all; with the preview hidden, the details
-        pane fills that whole second slot by itself (`_render`'s own doc).
-        `top_inset`/`left_inset` account for `fm:split`'s own `padding`
-        shifting the whole body down and right, same as `_show_tree_tooltip`'s
-        own correction -- left out, this anchor would drift further out of
-        sync with the details pane's real top-left corner (and, on a long
-        enough path, overlap rows the preview's own content actually
-        painted) every time the padding grows."""
+    def _hover_target_for(self, widget_id: str, hit: dict) -> dict | None:
+        """The `_hover` target a hit-tested `MouseEntered`'s own `widget` +
+        `"hit"` resolves to, or `None` for a hit this app has no tooltip
+        for (a chevron, a header, a scrollbar, ...)."""
+        kind = hit.get("kind")
+        if kind == "sidebar_panel_toolbar_button":
+            return {"kind": "toolbar", "action_id": widget_id}
+        if kind == "tree_row":
+            return {"kind": "tree", "row": hit.get("row")}
+        if kind == "data_table_row":
+            return {"kind": "details", "row": hit.get("row")}
+        return None
+
+    def _on_hover_entered(self, event: dict) -> None:
+        """A hit-tested `MouseEntered`. Always bumps `_hover_gen` and hides
+        whatever tooltip was showing before -- harmless when nothing was --
+        so a timer still in flight for the previous hover can never show a
+        stale tooltip once it fires. Arms a fresh delayed `show` only when
+        the new hit is one of the three kinds this app has a tooltip for."""
+        widget_id = event["MouseEntered"]["widget"]
+        target = self._hover_target_for(widget_id, event.get("hit") or {})
+        self._hover_gen += 1
+        self.actions.hide_tooltip()
+        self._hover = target
+        self._hover_pointer = None
+        if target is None:
+            return
+        self.waker.post_after(
+            self._tooltip_delay_ms, {"fm_tooltip": _TOOLTIP_SHOW, "gen": self._hover_gen}
+        )
+
+    def _on_hover_left(self, event: dict) -> None:
+        """A hit-tested `MouseLeft`: nothing is hovered anymore, so dismiss
+        immediately and invalidate any timer still in flight."""
+        self._hover = None
+        self._hover_pointer = None
+        self._hover_gen += 1
+        self.actions.hide_tooltip()
+
+    def _on_hover_moved(self, event: dict) -> None:
+        """Records the pointer's own on-screen position while something is
+        hovered -- `_hover_anchor_and_payload`'s details-row case anchors
+        off this directly, rather than approximating a `DataTable`'s own
+        (backend-owned) scroll offset."""
+        if self._hover is None:
+            return
+        position = event["MouseMoved"]["position"]
+        self._hover_pointer = (position["x"], position["y"])
+
+    def _on_hover_timer(self, payload) -> None:
+        """A `self.waker.post_after` timer fired, delivered as `{"User":
+        payload}` by `QuiApp.step`'s own drain (see this section's doc).
+        Stale unless `payload["gen"]` still matches `_hover_gen` -- a hover
+        change since this timer was armed already bumped that counter."""
+        if not isinstance(payload, dict) or payload.get("gen") != self._hover_gen:
+            return
+        kind = payload.get("fm_tooltip")
+        if kind == _TOOLTIP_SHOW:
+            anchor, tooltip = self._hover_anchor_and_payload()
+            if tooltip is None:
+                return
+            self.actions.show_tooltip(tooltip, anchor)
+            self.waker.post_after(
+                _TOOLTIP_AUTO_DISMISS_MS, {"fm_tooltip": _TOOLTIP_HIDE, "gen": self._hover_gen}
+            )
+        elif kind == _TOOLTIP_HIDE:
+            self.actions.hide_tooltip()
+
+    def _hover_anchor_and_payload(self) -> tuple[tuple[float, float, float, float] | None, dict | None]:
+        """The `(anchor, tooltip)` pair `_on_hover_timer`'s "show" branch
+        passes straight to `self.actions.show_tooltip` for whatever
+        `_hover` currently names -- `(None, None)` if that target has since
+        stopped existing (closed tab, filtered-out row, ...), which
+        `_on_hover_timer` treats as "nothing to show". See this section's
+        own doc for why each anchor is computed the way it is."""
+        hover = self._hover
+        if hover is None:
+            return None, None
         top_inset = _quantise_rows(_PANE_PADDING_PX, self._line_height)
         left_inset = _quantise_cols(_PANE_PADDING_PX, self._char_width)
-        x = left_inset + self.ratio * self._viewport_width
-        y = self._chrome_line_height + top_inset + self._line_height  # below the table's header row
-        second_split_width = (1.0 - self.ratio) * self._viewport_width
-        details_width = second_split_width * self.preview_ratio if self.preview_visible else second_split_width
-        width = max(1.0, details_width)
-        self.actions.show_tooltip(
-            _tooltip_payload("fm:tooltip:details", node), (x, y, width, self._line_height)
-        )
+        kind = hover["kind"]
+        if kind == "toolbar":
+            text = _toolbar_tooltips(self._nerd_fonts_enabled).get(hover["action_id"])
+            if not text:
+                return None, None
+            x, _y = self._hover_pointer or (0.0, 0.0)
+            anchor = (x, 0.0, 1.0, self._chrome_line_height)
+            return anchor, {"id": "fm:tooltip:toolbar", "text": text}
+        if kind == "tree":
+            rows, nodes = self._visible()
+            row = hover["row"]
+            if row is None or not (0 <= row < len(nodes)):
+                return None, None
+            node = nodes[row]
+            x = left_inset + _TREE_BORDER_INSET
+            y = (
+                self._chrome_line_height
+                + top_inset
+                + _TREE_BORDER_INSET
+                + (row - self.scroll) * self._line_height
+            )
+            width = max(1.0, self.ratio * self._viewport_width - 2 * _TREE_BORDER_INSET - left_inset)
+            return (x, y, width, self._line_height), _tooltip_payload("fm:tooltip:tree", node)
+        if kind == "details":
+            if not self.open:
+                return None, None
+            folder = self.open[self.active_tab]
+            children = self._visible_children(folder)
+            row = hover["row"]
+            if row is None or not (0 <= row < len(children)):
+                return None, None
+            node = children[row]
+            x = left_inset + self.ratio * self._viewport_width
+            default_y = self._chrome_line_height + top_inset + self._line_height
+            _x, y = self._hover_pointer or (0.0, default_y)
+            second_split_width = (1.0 - self.ratio) * self._viewport_width
+            details_width = (
+                second_split_width * self.preview_ratio if self.preview_visible else second_split_width
+            )
+            width = max(1.0, details_width)
+            return (x, y, width, self._line_height), _tooltip_payload("fm:tooltip:details", node)
+        return None, None
 
     def _scroll_to_cursor(self, cursor_index: int, row_count: int) -> None:
         """Advance `scroll` so the cursor row stays within the painted window,
@@ -1857,11 +2023,10 @@ class FileManager:
         Left/Right (`_expand`/`_collapse`) ever expands or collapses a row,
         so clicking around the tree is never "jumpy"."""
         rows, nodes = folder_rows(self.root)
-        for idx, (row, node) in enumerate(zip(rows, nodes)):
+        for row, node in zip(rows, nodes):
             if row["path"] == list(path):
                 self.cursor = node
                 self.table_focus = False  # a tree click always hands focus back to the tree
-                self._show_tree_tooltip(node, idx)
                 self._show_folder_in_active_tab(node)
                 return
 
@@ -2386,12 +2551,12 @@ class FileManager:
         """Cell width of the preview column (header + content): the
         viewport's share left after the tree pane (`ratio`) and the
         details pane (`preview_ratio` of what's left) are taken out --
-        the complementary fraction to `_show_file_tooltip`'s own details-
-        pane width. Also deducts `fm:split`'s right-edge `padding` (this
-        pane is the rightmost thing on screen, so only the right edge
+        the complementary fraction to `_hover_anchor_and_payload`'s own
+        details-pane width. Also deducts `fm:split`'s right-edge `padding`
+        (this pane is the rightmost thing on screen, so only the right edge
         touches it) and `fm:detail_split`'s own `gap` (between it and the
         details pane next to it), both quantised the same way
-        `_show_tree_tooltip`'s own insets are -- left out, this would
+        `_hover_anchor_and_payload`'s own insets are -- left out, this would
         over-count by those two cells and budget a header name a few
         characters longer than the column can actually paint. Still
         doesn't account for the two splits' own divider columns, same as
@@ -2695,6 +2860,22 @@ class FileManager:
             # event's own handling (a `MouseUp` itself has none here).
             self._dragging = False
             self.actions.set_cursor("default")
+
+        # Hover tooltips (see that section's own doc): handled ahead of
+        # `edit_mode`/the overlay checks below so a hover never gets
+        # swallowed while the filter/rename box or a dialog is open.
+        if "MouseEntered" in event:
+            self._on_hover_entered(event)
+            return
+        if "MouseLeft" in event:
+            self._on_hover_left(event)
+            return
+        if "MouseMoved" in event:
+            self._on_hover_moved(event)
+            return
+        if "User" in event:
+            self._on_hover_timer(event["User"])
+            return
 
         if self.edit_mode is not None and self._handle_edit_key(event):
             return
