@@ -1230,13 +1230,14 @@ ACCELERATORS = [
 # tooltip never follows the keyboard the way the old pseudo-hover did.
 #
 # `QuiAppWaker.post_after` reaches whichever backend `QuiApp`'s own current
-# waker points at. `run_native` now swaps that waker onto the live
-# GTK/AppKit/Win32 backend before handing control to its event loop (see
-# `QuiApp.current_waker`'s own doc, `quadraui-py/src/lib.rs`, fixed in
-# quadraui#2278), so a post made while a native window is open is delivered
-# to that window the same way it is on the TUI/headless backends --
-# `hover_tooltips_enabled` stays `True` on every backend, including native;
-# neither `cli.py` nor this module's own `__main__` block opts it back out.
+# waker points at. `run_native` swaps that waker onto the live GTK/AppKit/
+# Win32 backend before handing control to its event loop (see
+# `QuiApp.current_waker`'s own doc, `quadraui-py/src/lib.rs`; that swap is
+# quadraui#2278's own doing), so a post made while a native window is open
+# is delivered to that window the same way it is on the TUI/headless
+# backends. `hover_tooltips_enabled` stays `True` on every backend,
+# including native -- no caller in this app flips it off before
+# `run_tui`/`run_native`.
 #
 # `anchor` is a `(x, y, width, height)` rect in this app's own cell grid --
 # the same units `line_height`/`chrome_line_height`/`viewport` already
@@ -1544,10 +1545,11 @@ class FileManager:
         self._tooltip_delay_ms = _DEFAULT_TOOLTIP_DELAY_MS
         # `True` on every backend -- the TUI/headless backends `self.app`/
         # headless tests always talk to, and native too, since `run_native`
-        # now swaps `QuiAppWaker`'s delivery onto the live native backend
-        # (see the "chrome: hover tooltips" section's own doc). `FileManager`
-        # never sets this itself; neither does `cli.py`/this module's own
-        # `__main__`.
+        # swaps `QuiAppWaker`'s delivery onto the live native backend (see
+        # the "chrome: hover tooltips" section's own doc). `FileManager`
+        # never sets this itself, nor does `cli.py`/this module's own
+        # `__main__` -- it is a plain opt-out left for any caller that wants
+        # one, not something this app's own code paths ever flip.
         self.hover_tooltips_enabled = True
         # Status-bar colors, same placeholder-then-overwrite dance as the
         # metrics above: `_apply_system_theme` (below) picks the real

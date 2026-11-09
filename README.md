@@ -76,6 +76,11 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the toolbar, tree and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
 
+Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
+the app's own delayed-show/auto-dismiss timers through `QuiAppWaker.post_after`, which
+`run_native` swaps onto the live GTK/AppKit/Win32 backend before handing control to its
+event loop — see `app.py`'s "chrome: hover tooltips" section doc.
+
 ## Testing — black-box is the acceptance bar
 
 Every behavior-changing PR ships a **black-box test** that drives the running app
@@ -105,11 +110,6 @@ at all (`UNDO_SUPPORTED` in `app.py`) — a host capability, not a backend branc
 A right-click would be the natural way to raise the context menu, but the pinned
 quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
 them, so `Menu` is the keyboard stand-in.
-
-Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
-the app's own delayed-show/auto-dismiss timers through `QuiAppWaker.post_after`, which
-`run_native` swaps onto the live GTK/AppKit/Win32 backend before handing control to its
-event loop — see `app.py`'s "chrome: hover tooltips" section doc.
 
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
 keeps it applied and closes the box), `F2` to inline-rename the selected file or

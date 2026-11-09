@@ -17,7 +17,7 @@ this suite shortens through `fm.app.set_style`/`fm.refresh_tooltip_delay`
 
 import time
 
-import quadraui
+from quadraui import QuiApp
 
 from conftest import find_row as _find_row
 from quadraui_files import app as _app_module
@@ -30,13 +30,15 @@ from quadraui_files.app import ENTER_KEY, _key_event
 DELAY_MS = 30
 _SLEEP_S = (DELAY_MS + 70) / 1000
 
-# The status bar's own row -- every test in this file builds `fm` with
-# `height=30`, so row 29 is the last painted row, below the tree/details
-# body band and the outer split's own divider. Nothing hit-tested there
-# resolves to a `_hover_target_for` target, so moving here always counts as
-# "left" whatever was hovered, through the plain `_on_hover_left` branch
-# rather than `_on_hover_entered`'s own unconditional hide (unlike `(0, 1)`,
-# the first body row, which still sits inside the tree/split's own hit area).
+# The status bar's own row -- every test in this file ends up with `fm` at
+# `height=30`, either an explicit constructor argument or (for the
+# `cli.main`-driven test) `FileManager.__init__`'s own default, so row 29 is
+# always the last painted row, below the tree/details body band and the
+# outer split's own divider. Nothing hit-tested there resolves to a
+# `_hover_target_for` target, so moving here always counts as "left"
+# whatever was hovered, through the plain `_on_hover_left` branch rather
+# than `_on_hover_entered`'s own unconditional hide (unlike `(0, 1)`, the
+# first body row, which still sits inside the tree/split's own hit area).
 _OFF_X, _OFF_Y = 0.0, 29.0
 
 
@@ -203,10 +205,10 @@ def test_continued_movement_within_a_tree_row_re_arms_the_auto_dismiss_window(sa
 
 def test_hover_tooltips_disabled_flag_suppresses_the_delayed_show(sample_tree):
     """`hover_tooltips_enabled` is a plain opt-out any caller can flip --
-    `FileManager` itself never does, and neither does `cli.py` anymore (see
-    the "chrome: hover tooltips" section doc). With the flag off,
-    `_on_hover_entered` must not arm a show timer at all -- waiting past
-    the delay must never show a tooltip."""
+    `FileManager` itself never does, nor does `cli.py` (see the "chrome:
+    hover tooltips" section doc). With the flag off, `_on_hover_entered`
+    must not arm a show timer at all -- waiting past the delay must never
+    show a tooltip."""
     fm = FileManager(sample_tree, width=160, height=30)
     _shorten_tooltip_delay(fm)
     fm.hover_tooltips_enabled = False
@@ -215,54 +217,6 @@ def test_hover_tooltips_disabled_flag_suppresses_the_delayed_show(sample_tree):
     _move_to(fm, x, y)
     _wait_past_the_delay_and_tick(fm)
     assert str(sample_tree / "alpha") not in fm.app.screen()
-
-
-def test_cli_native_branch_leaves_tooltips_enabled_and_a_hover_still_fires(sample_tree, monkeypatch):
-    """`cli.main`'s `--native` arm sets `native_window_chrome`/`native_tray`
-    right before the one call that opens a real window, but, since
-    `run_native` now swaps `QuiAppWaker`'s delivery onto the live native
-    backend (quadraui#2278), it no longer flips `hover_tooltips_enabled`
-    off first -- that opt-out line is gone from both `cli.py` and this
-    module's own `__main__`.
-
-    A real native window/display isn't available headlessly, so this
-    stubs only `QuiApp.run_native` itself (not `FileManager` or the rest
-    of `cli.main`'s own code) to drive the exact same `push_event`/`step`
-    hover dance the other tests in this file drive against the headless
-    backend -- the closest stand-in for that native waker path, proving
-    both the flag and the pipeline it gates still work on the real code
-    path `cli.main` takes for `--native`."""
-    captured: dict = {}
-
-    def _fake_run_native(self, title=None):
-        fm = captured["fm"]
-        x, y = _find_row(fm, "alpha")
-        _move_to(fm, x, y)
-        _wait_past_the_delay_and_tick(fm)
-        alpha_path = str(sample_tree / "alpha")
-        captured["hover_tooltips_enabled"] = fm.hover_tooltips_enabled
-        captured["shown_after_delay"] = alpha_path in fm.app.screen()
-
-        _move_to(fm, _OFF_X, _OFF_Y)
-        captured["hidden_after_leave"] = alpha_path not in fm.app.screen()
-
-    monkeypatch.setattr(quadraui.QuiApp, "run_native", _fake_run_native, raising=False)
-
-    real_file_manager = _cli_module.FileManager
-
-    def _spy_file_manager(*args, **kwargs):
-        fm = real_file_manager(*args, **kwargs)
-        _shorten_tooltip_delay(fm)
-        captured["fm"] = fm
-        return fm
-
-    monkeypatch.setattr(_cli_module, "FileManager", _spy_file_manager)
-
-    assert _cli_module.main([str(sample_tree), "--native"]) == 0
-
-    assert captured["hover_tooltips_enabled"] is True
-    assert captured["shown_after_delay"] is True
-    assert captured["hidden_after_leave"] is True
 
 
 # --- details row --------------------------------------------------------------
@@ -306,3 +260,67 @@ def test_a_tree_tooltip_auto_dismisses_after_idle_timeout_with_no_movement(sampl
 
     _wait_past_the_delay_and_tick(fm)  # past the (also-shortened) auto-dismiss window, no movement
     assert alpha_path not in fm.app.screen()
+
+
+# --- cli / native path ---------------------------------------------------------
+
+
+def test_cli_native_branch_leaves_tooltips_enabled_and_a_hover_still_fires(sample_tree, monkeypatch):
+    """`cli.main`'s `--native` arm sets `native_window_chrome`/`native_tray`
+    right before the one call that opens a real window, and does not touch
+    `hover_tooltips_enabled` -- `run_native` swaps `QuiAppWaker`'s delivery
+    onto the live native backend (quadraui#2278), so the flag can stay
+    `True` there the same as on every other backend (see the "chrome:
+    hover tooltips" section doc).
+
+    A real native window/display isn't available headlessly, so this
+    stubs only `QuiApp.run_native` itself (not `FileManager` or the rest
+    of `cli.main`'s own code) to drive the exact same `push_event`/`step`
+    hover dance the other tests in this file drive against the headless
+    backend -- the closest stand-in for that native waker path, proving
+    both the flag and the pipeline it gates still work on the real code
+    path `cli.main` takes for `--native`. It covers both halves of the
+    hover-card contract on that path: a tooltip shows after the hover
+    delay, and it auto-dismisses after `_TOOLTIP_AUTO_DISMISS_MS` of no
+    further movement (shortened here the same way `_shorten_tooltip_delay`
+    shortens the show delay)."""
+    dismiss_ms = 200
+    monkeypatch.setattr(_app_module, "_TOOLTIP_AUTO_DISMISS_MS", dismiss_ms)
+    captured: dict = {}
+
+    def _fake_run_native(self, title=None):
+        fm = captured["fm"]
+        x, y = _find_row(fm, "alpha")
+        _move_to(fm, x, y)
+        _wait_past_the_delay_and_tick(fm)
+        alpha_path = str(sample_tree / "alpha")
+        captured["hover_tooltips_enabled"] = fm.hover_tooltips_enabled
+        captured["shown_after_delay"] = alpha_path in fm.app.screen()
+
+        _sleep_ms(dismiss_ms + 70)  # no further movement -- idle-timeout half
+        fm.app.step()
+        captured["dismissed_after_idle"] = alpha_path not in fm.app.screen()
+
+    monkeypatch.setattr(QuiApp, "run_native", _fake_run_native, raising=False)
+
+    real_file_manager = _cli_module.FileManager
+
+    def _spy_file_manager(*args, **kwargs):
+        # `cli.main` builds `FileManager` with no explicit width/height, so
+        # without this the constructor defaults (`width=100`) truncate the
+        # tooltip's full-path text on a wide `tmp_path` (e.g. macOS's
+        # longer `$TMPDIR`) -- match every other test in this file instead.
+        kwargs.setdefault("width", 160)
+        kwargs.setdefault("height", 30)
+        fm = real_file_manager(*args, **kwargs)
+        _shorten_tooltip_delay(fm)
+        captured["fm"] = fm
+        return fm
+
+    monkeypatch.setattr(_cli_module, "FileManager", _spy_file_manager)
+
+    assert _cli_module.main([str(sample_tree), "--native"]) == 0
+
+    assert captured["hover_tooltips_enabled"] is True
+    assert captured["shown_after_delay"] is True
+    assert captured["dismissed_after_idle"] is True
