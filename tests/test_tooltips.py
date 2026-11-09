@@ -18,6 +18,7 @@ this suite shortens through `fm.app.set_style`/`fm.refresh_tooltip_delay`
 import time
 
 from conftest import find_row as _find_row
+from quadraui_files import app as _app_module
 from quadraui_files import FileManager
 from quadraui_files.app import ENTER_KEY, _key_event
 
@@ -26,9 +27,14 @@ from quadraui_files.app import ENTER_KEY, _key_event
 DELAY_MS = 30
 _SLEEP_S = (DELAY_MS + 70) / 1000
 
-# Far outside every painted pane (toolbar, tree, details) at the widths this
-# file's tests use -- moving here always counts as "left" whatever was hovered.
-_OFF_X, _OFF_Y = 0.0, 1.0
+# The status bar's own row -- every test in this file builds `fm` with
+# `height=30`, so row 29 is the last painted row, below the tree/details
+# body band and the outer split's own divider. Nothing hit-tested there
+# resolves to a `_hover_target_for` target, so moving here always counts as
+# "left" whatever was hovered, through the plain `_on_hover_left` branch
+# rather than `_on_hover_entered`'s own unconditional hide (unlike `(0, 1)`,
+# the first body row, which still sits inside the tree/split's own hit area).
+_OFF_X, _OFF_Y = 0.0, 29.0
 
 
 def _move_to(fm: FileManager, x: float, y: float) -> None:
@@ -62,6 +68,10 @@ def _wait_past_the_delay_and_tick(fm: FileManager) -> None:
     timer `_on_hover_entered` armed, if the pointer never moved off."""
     time.sleep(_SLEEP_S)
     fm.app.step()
+
+
+def _sleep_ms(ms: float) -> None:
+    time.sleep(ms / 1000)
 
 
 def _open_root_tab(fm: FileManager) -> None:
@@ -141,6 +151,70 @@ def test_moving_from_one_tree_row_to_another_replaces_the_tooltip_text(sample_tr
     assert alpha_path not in fm.app.screen()
 
 
+def test_hovering_a_tree_rows_chevron_shows_the_same_rows_tooltip(sample_tree):
+    """`_hover_target_for` folds `tree_chevron` into the same `"tree"`
+    target as `tree_row` -- hovering the row's own expand/collapse
+    triangle must show that row's tooltip too, not be treated as a hit
+    this app has no tooltip for."""
+    fm = FileManager(sample_tree, width=160, height=30)
+    _shorten_tooltip_delay(fm)
+
+    _, y = _find_row(fm, "alpha")
+    line = fm.app.screen().splitlines()[int(y)]
+    chevron_x = next(i for i, ch in enumerate(line) if ch in "▾▸")
+
+    _move_to(fm, float(chevron_x), y)
+    _wait_past_the_delay_and_tick(fm)
+    assert str(sample_tree / "alpha") in fm.app.screen()
+
+
+def test_continued_movement_within_a_tree_row_re_arms_the_auto_dismiss_window(sample_tree, monkeypatch):
+    """`_on_hover_moved` re-arms the dismiss timer while a tooltip is
+    already showing, so VS Code's "about 5s of no movement" contract is
+    measured from the *last* move, not from when the tooltip first
+    appeared -- wiggling the pointer inside the same row must not dismiss
+    it on the original schedule."""
+    dismiss_ms = 200
+    monkeypatch.setattr(_app_module, "_TOOLTIP_AUTO_DISMISS_MS", dismiss_ms)
+    fm = FileManager(sample_tree, width=160, height=30)
+    _shorten_tooltip_delay(fm)
+
+    x, y = _find_row(fm, "alpha")
+    _move_to(fm, x, y)
+    _wait_past_the_delay_and_tick(fm)
+    alpha_path = str(sample_tree / "alpha")
+    assert alpha_path in fm.app.screen()
+
+    _sleep_ms(dismiss_ms * 0.75)
+    _move_to(fm, x + 1, y)  # still inside the same row -- re-arms the window
+    _sleep_ms(dismiss_ms * 0.75)
+    fm.app.step()
+    assert alpha_path in fm.app.screen(), (
+        "continued movement inside the same row must re-arm the dismiss window"
+    )
+
+    _sleep_ms(dismiss_ms * 0.75)
+    fm.app.step()
+    assert alpha_path not in fm.app.screen()
+
+
+def test_hover_tooltips_disabled_flag_suppresses_the_delayed_show(sample_tree):
+    """`cli.py` sets `hover_tooltips_enabled = False` right before
+    `run_native()`: `QuiAppWaker.post_after` is never delivered while a
+    native window owns the run loop (see `app.py`'s "chrome: hover
+    tooltips" section doc), so arming it there would only ever queue a
+    dead timer. With the flag off, `_on_hover_entered` must not arm one at
+    all -- waiting past the delay must never show a tooltip."""
+    fm = FileManager(sample_tree, width=160, height=30)
+    _shorten_tooltip_delay(fm)
+    fm.hover_tooltips_enabled = False
+
+    x, y = _find_row(fm, "alpha")
+    _move_to(fm, x, y)
+    _wait_past_the_delay_and_tick(fm)
+    assert str(sample_tree / "alpha") not in fm.app.screen()
+
+
 # --- details row --------------------------------------------------------------
 
 
@@ -157,7 +231,28 @@ def test_hovering_a_details_row_shows_path_size_and_modified_time(sample_tree):
     _wait_past_the_delay_and_tick(fm)
     screen = fm.app.screen()
     assert readme_path in screen
-    assert "B" in screen  # the human-readable size ("5 B")
+    assert "5 B" in screen  # the human-readable size, exact (plain "B" matches the toolbar too)
 
     _move_to(fm, _OFF_X, _OFF_Y)
     assert readme_path not in fm.app.screen()
+
+
+def test_a_tree_tooltip_auto_dismisses_after_idle_timeout_with_no_movement(sample_tree, monkeypatch):
+    """`_on_hover_timer`'s `_TOOLTIP_HIDE` branch: left alone (no `MouseLeft`,
+    no further movement) for `_TOOLTIP_AUTO_DISMISS_MS`, a shown tooltip
+    hides itself -- VS Code's own idle-timeout half of the hover-card
+    contract, not just the pointer-leave half the other tests cover.
+    Shortened the same way `_shorten_tooltip_delay` shortens the show
+    delay, so this stays as fast as every other test here."""
+    monkeypatch.setattr(_app_module, "_TOOLTIP_AUTO_DISMISS_MS", DELAY_MS)
+    fm = FileManager(sample_tree, width=160, height=30)
+    _shorten_tooltip_delay(fm)
+
+    x, y = _find_row(fm, "alpha")
+    _move_to(fm, x, y)
+    _wait_past_the_delay_and_tick(fm)
+    alpha_path = str(sample_tree / "alpha")
+    assert alpha_path in fm.app.screen()
+
+    _wait_past_the_delay_and_tick(fm)  # past the (also-shortened) auto-dismiss window, no movement
+    assert alpha_path not in fm.app.screen()
