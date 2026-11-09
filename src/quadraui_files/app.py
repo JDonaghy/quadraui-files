@@ -1030,20 +1030,19 @@ def _toolbar(nerd_fonts_enabled: bool) -> dict:
     }
 
 
-def _toolbar_tooltips(nerd_fonts_enabled: bool) -> dict[str, str]:
-    """Maps each `_toolbar` action id to its own `tooltip` string, read back
-    from `_toolbar`'s own built descriptor rather than a second hand-copied
-    table, so the hover handler (this section's own doc) can never drift
-    out of sync with what a click on the same button actually does.
-    `nerd_fonts_enabled` only ever changes which icon glyph an action's
-    `Action.icon` carries, never its `tooltip`, so any value would do here --
-    taking it as a parameter rather than hardcoding one keeps this reading
-    the exact same `_toolbar` a given frame painted."""
-    return {
-        entry["Action"]["id"]: entry["Action"]["tooltip"]
-        for entry in _toolbar(nerd_fonts_enabled)["buttons"]
-        if isinstance(entry, dict) and "Action" in entry
-    }
+# Maps each `_toolbar` action id to its own `tooltip` string, read back
+# from `_toolbar`'s own built descriptor once, at import time, rather than
+# a second hand-copied table -- so the hover handler (this section's own
+# doc) can never drift out of sync with what a click on the same button
+# actually does. Built from `_toolbar(False)`: `nerd_fonts_enabled` only
+# ever changes which icon glyph an action's `Action.icon` carries, never
+# its `tooltip`, so there is no need to rebuild this per-frame from
+# whatever `_nerd_fonts_enabled` a given `FileManager` measured.
+_TOOLBAR_TOOLTIPS: dict[str, str] = {
+    entry["Action"]["id"]: entry["Action"]["tooltip"]
+    for entry in _toolbar(False)["buttons"]
+    if isinstance(entry, dict) and "Action" in entry
+}
 
 
 # `StatusBarSegment` requires explicit fg + bg (unlike the theme-driven
@@ -1182,9 +1181,8 @@ ACCELERATORS = [
 # pair around a change, each carrying the hit widget's own id and a `"hit"`
 # detail (`TreeRow{row}`, `DataTableRow{row}`, `SidebarPanelToolbarButton
 # {bar}` -- this app's toolbar is the `sidebar_panel`'s own reserved slot,
-# see that section's doc) -- real per-backend plumbing, not something this
-# app derives itself; see `quadraui-binding-core/src/engine.rs`'s own doc on
-# that synthesis.
+# see that section's doc); see `quadraui-binding-core/src/engine.rs`'s own
+# doc on that synthesis.
 #
 # Neither `Action.tooltip`/`spec.tooltip` nor the host's own
 # `BindingHost::drive_hover_tooltip` cover any of that: the host only ever
@@ -1217,14 +1215,41 @@ ACCELERATORS = [
 #     own delivery contract) -- `_on_hover_timer` only acts if `gen` still
 #     matches `_hover_gen`, i.e. nothing has re-armed or cancelled it
 #     since. A matching "show" calls `self.actions.show_tooltip` from
-#     `_hover_anchor_and_payload` and arms a second `post_after` for the
-#     fixed auto-dismiss window (`_TOOLTIP_AUTO_DISMISS_MS`, VS Code-like --
-#     about 5s); a matching "hide" is that window elapsing with the same
-#     hover still live, and just calls `self.actions.hide_tooltip()`.
+#     `_hover_anchor_and_payload`, sets `_tooltip_visible`, and arms a
+#     second `post_after` for the auto-dismiss window
+#     (`_TOOLTIP_AUTO_DISMISS_MS`, VS Code-like -- about 5s of no
+#     movement); `_on_hover_moved` re-arms that same window (bumping
+#     `_hover_gen` again so the stale one is a no-op) each time the pointer
+#     moves while `_tooltip_visible`, so holding the pointer inside the same
+#     row and wiggling it does not dismiss on the original schedule. A
+#     matching "hide" is that window elapsing with nothing having re-armed
+#     it, and just calls `self.actions.hide_tooltip()`.
 #
 # The keyboard cursor (`_move`) and a details-table row click/activation no
 # longer show a tooltip at all -- only a real pointer hover does, so the
 # tooltip never follows the keyboard the way the old pseudo-hover did.
+#
+# `QuiAppWaker.post_after` only ever reaches whichever backend `QuiApp`'s
+# own current waker points at, and `run_native` does not swap that: a
+# window opened via `run_native` has no `Backend::waker`-reachable accessor
+# on `GtkRunner`/`MacRunner`/`WinRunner` today (see `QuiApp.
+# current_waker`'s own doc, `quadraui-py/src/lib.rs`), so a post made while
+# a native window is open queues against the dormant headless backend and
+# is only delivered, as one lump-sum burst, once the window closes. That
+# means this whole delayed-show/auto-dismiss pipeline cannot ever deliver a
+# tooltip on the native backend as things stand upstream -- tracked as
+# BLOCKED_ON_UPSTREAM against quadraui (the fix is a `run_native`-side
+# waker swap, not something this app can work around). Posting while a
+# native window is open is also a documented anti-pattern regardless of
+# whether delivery would matter: each queued post holds a strong
+# reference and spawns a background thread, so an app that posts on every
+# hover change for a long native session accumulates both for the window's
+# whole lifetime. `hover_tooltips_enabled` (set `False` by `cli.py` right
+# before `run_native()`, the same opt-in-flag pattern `native_window_chrome`/
+# `native_tray` already use) gates `_on_hover_entered`'s `post_after` off
+# entirely on native, so no post is ever queued there -- no tooltip shows on
+# native today, but nothing accumulates either, and flipping the flag back
+# once the upstream waker swap lands is the entire native fix.
 #
 # `anchor` is a `(x, y, width, height)` rect in this app's own cell grid --
 # the same units `line_height`/`chrome_line_height`/`viewport` already
@@ -1241,7 +1266,12 @@ ACCELERATORS = [
 # regardless, so an off-by-a-cell anchor never overflows or crashes.
 
 _DEFAULT_TOOLTIP_DELAY_MS = 500  # VS Code's own hover-card delay; used if `Style.tooltip_delay_ms` is unset
-_TOOLTIP_AUTO_DISMISS_MS = 5000  # VS Code-like: hide a still-hovered tooltip after this long with no change
+# Upstream has a matching `Style.tooltip_auto_dismiss_ms` token
+# (`quadraui/src/style.rs`) for exactly this knob, but it defaults to `0`
+# (disabled) -- hardcoding VS Code's own ~5s here, rather than reading that
+# token, is the right call for what this app asks for (an always-on
+# auto-dismiss), not an oversight of the token's existence.
+_TOOLTIP_AUTO_DISMISS_MS = 5000
 _TOOLTIP_SHOW = "show"
 _TOOLTIP_HIDE = "hide"
 
@@ -1512,13 +1542,28 @@ class FileManager:
         # Hover-tooltip state (see that section's own doc). `_hover` is the
         # current pointer target (`None` when nothing is hovered); `_hover_gen`
         # is the generation token every armed `post_after` timer carries, so
-        # a later hover change can invalidate one still in flight.
-        # `_tooltip_delay_ms` is placeholder-then-overwrite like the metrics
-        # above -- `QuiApp.style()` can't be read before `self.app` exists.
+        # a later hover change (or a re-arm of the auto-dismiss window on
+        # continued movement, see `_on_hover_moved`) can invalidate one still
+        # in flight. `_tooltip_visible` is `True` only once a "show" timer has
+        # actually fired -- `_on_hover_moved` re-arms the auto-dismiss window
+        # on continued movement only while this is set, never while still
+        # waiting out the initial show delay. `_tooltip_delay_ms` is
+        # placeholder-then-overwrite like the metrics above -- `QuiApp.
+        # style()` can't be read before `self.app` exists.
         self._hover: dict | None = None
         self._hover_pointer: tuple[float, float] | None = None
         self._hover_gen = 0
+        self._tooltip_visible = False
         self._tooltip_delay_ms = _DEFAULT_TOOLTIP_DELAY_MS
+        # Opt-in, same `native_window_chrome`/`native_tray` story just below
+        # but inverted: `True` by default (every hover timer this app arms
+        # is safe and live on the TUI backend `self.app`/headless tests
+        # always talk to), and set `False` by `cli.py`/this module's own
+        # `__main__` right before a `run_native()` call -- see the "chrome:
+        # hover tooltips" section's own doc for why `QuiAppWaker.post_after`
+        # specifically cannot be armed while a native window owns the run
+        # loop. `FileManager` never sets this itself.
+        self.hover_tooltips_enabled = True
         # Status-bar colors, same placeholder-then-overwrite dance as the
         # metrics above: `_apply_system_theme` (below) picks the real
         # light/dark pair from `system_theme()` right after `self.app`
@@ -1787,11 +1832,14 @@ class FileManager:
     def _hover_target_for(self, widget_id: str, hit: dict) -> dict | None:
         """The `_hover` target a hit-tested `MouseEntered`'s own `widget` +
         `"hit"` resolves to, or `None` for a hit this app has no tooltip
-        for (a chevron, a header, a scrollbar, ...)."""
+        for (a header, a scrollbar, ...). `tree_chevron` folds into the
+        same `"tree"` target as `tree_row` -- a pointer crossing a row's
+        own expand/collapse triangle on its way across the row is still,
+        to the user, hovering that row, not leaving it."""
         kind = hit.get("kind")
         if kind == "sidebar_panel_toolbar_button":
             return {"kind": "toolbar", "action_id": widget_id}
-        if kind == "tree_row":
+        if kind in ("tree_row", "tree_chevron"):
             return {"kind": "tree", "row": hit.get("row")}
         if kind == "data_table_row":
             return {"kind": "details", "row": hit.get("row")}
@@ -1802,42 +1850,60 @@ class FileManager:
         whatever tooltip was showing before -- harmless when nothing was --
         so a timer still in flight for the previous hover can never show a
         stale tooltip once it fires. Arms a fresh delayed `show` only when
-        the new hit is one of the three kinds this app has a tooltip for."""
+        the new hit is one of the three kinds this app has a tooltip for,
+        and only where `hover_tooltips_enabled` says `self.waker.post_after`
+        is actually safe/live -- see the "chrome: hover tooltips" section's
+        own doc for why that excludes `run_native`."""
         widget_id = event["MouseEntered"]["widget"]
         target = self._hover_target_for(widget_id, event.get("hit") or {})
         self._hover_gen += 1
+        self._tooltip_visible = False
         self.actions.hide_tooltip()
         self._hover = target
         self._hover_pointer = None
-        if target is None:
+        if target is None or not self.hover_tooltips_enabled:
             return
         self.waker.post_after(
             self._tooltip_delay_ms, {"fm_tooltip": _TOOLTIP_SHOW, "gen": self._hover_gen}
         )
 
-    def _on_hover_left(self, event: dict) -> None:
+    def _on_hover_left(self, _event: dict) -> None:
         """A hit-tested `MouseLeft`: nothing is hovered anymore, so dismiss
         immediately and invalidate any timer still in flight."""
         self._hover = None
         self._hover_pointer = None
         self._hover_gen += 1
+        self._tooltip_visible = False
         self.actions.hide_tooltip()
 
     def _on_hover_moved(self, event: dict) -> None:
         """Records the pointer's own on-screen position while something is
         hovered -- `_hover_anchor_and_payload`'s details-row case anchors
         off this directly, rather than approximating a `DataTable`'s own
-        (backend-owned) scroll offset."""
+        (backend-owned) scroll offset. Also re-arms the auto-dismiss window
+        while a tooltip is actually showing (`_tooltip_visible`), so VS
+        Code's "about 5s of no movement" contract is measured from the last
+        move, not from when the tooltip first appeared -- holding the
+        pointer inside the same row and wiggling it must not dismiss on the
+        original schedule. Bumping `_hover_gen` here invalidates whatever
+        dismiss timer was already in flight, the same staleness check
+        `_on_hover_timer` already does for every other re-arm."""
         if self._hover is None:
             return
         position = event["MouseMoved"]["position"]
         self._hover_pointer = (position["x"], position["y"])
+        if self._tooltip_visible and self.hover_tooltips_enabled:
+            self._hover_gen += 1
+            self.waker.post_after(
+                _TOOLTIP_AUTO_DISMISS_MS, {"fm_tooltip": _TOOLTIP_HIDE, "gen": self._hover_gen}
+            )
 
     def _on_hover_timer(self, payload) -> None:
         """A `self.waker.post_after` timer fired, delivered as `{"User":
         payload}` by `QuiApp.step`'s own drain (see this section's doc).
         Stale unless `payload["gen"]` still matches `_hover_gen` -- a hover
-        change since this timer was armed already bumped that counter."""
+        change, or `_on_hover_moved` re-arming the auto-dismiss window,
+        since this timer was armed already bumped that counter."""
         if not isinstance(payload, dict) or payload.get("gen") != self._hover_gen:
             return
         kind = payload.get("fm_tooltip")
@@ -1846,10 +1912,12 @@ class FileManager:
             if tooltip is None:
                 return
             self.actions.show_tooltip(tooltip, anchor)
+            self._tooltip_visible = True
             self.waker.post_after(
                 _TOOLTIP_AUTO_DISMISS_MS, {"fm_tooltip": _TOOLTIP_HIDE, "gen": self._hover_gen}
             )
         elif kind == _TOOLTIP_HIDE:
+            self._tooltip_visible = False
             self.actions.hide_tooltip()
 
     def _hover_anchor_and_payload(self) -> tuple[tuple[float, float, float, float] | None, dict | None]:
@@ -1866,7 +1934,7 @@ class FileManager:
         left_inset = _quantise_cols(_PANE_PADDING_PX, self._char_width)
         kind = hover["kind"]
         if kind == "toolbar":
-            text = _toolbar_tooltips(self._nerd_fonts_enabled).get(hover["action_id"])
+            text = _TOOLBAR_TOOLTIPS.get(hover["action_id"])
             if not text:
                 return None, None
             x, _y = self._hover_pointer or (0.0, 0.0)
@@ -3241,6 +3309,11 @@ if __name__ == "__main__":
         # (`_NATIVE_BACKEND`), not the host OS.
         fm.native_window_chrome = _NATIVE_BACKEND == "macos"
         fm.native_tray = _NATIVE_BACKEND in ("gtk", "macos", "win")
+        # Hover tooltips ride `QuiAppWaker.post_after`, which `run_native`
+        # never delivers (see `hover_tooltips_enabled`'s own doc, and the
+        # "chrome: hover tooltips" section's) -- opt out here, same story
+        # as the two flags just above.
+        fm.hover_tooltips_enabled = False
         try:
             fm.app.run_native(title=fm.window_title)
         except _Quit:
