@@ -73,7 +73,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
 | **Preview** | Read-only preview pane for the selected file | ✅ all backends |
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
-| **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the toolbar, tree and details rows | ✅ TUI/headless; blocked on native until quadraui's `run_native` delivers `post_after` ([known limits](#known-limits)) |
+| **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the toolbar, tree and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
 
 ## Testing — black-box is the acceptance bar
@@ -106,15 +106,10 @@ A right-click would be the natural way to raise the context menu, but the pinned
 quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
 them, so `Menu` is the keyboard stand-in.
 
-Hover tooltips work on TUI and in headless tests, but not yet on the native backend.
-They're driven by the app's own delayed-show/auto-dismiss timers through
-`QuiAppWaker.post_after`, and `run_native` never swaps `QuiApp`'s current waker onto the
-live GTK/AppKit/Win32 backend — a post made while a native window is open queues against
-the dormant headless backend instead and is never delivered while the window stays open.
-`cli.py` opts out of arming those timers at all on native (`FileManager.
-hover_tooltips_enabled`), so no tooltip ever appears there today, but nothing piles up
-either. Fixing this needs quadraui's `run_native` to deliver `post_after`/`User` events
-to a live native window; see `app.py`'s "chrome: hover tooltips" section doc.
+Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
+the app's own delayed-show/auto-dismiss timers through `QuiAppWaker.post_after`, which
+`run_native` swaps onto the live GTK/AppKit/Win32 backend before handing control to its
+event loop — see `app.py`'s "chrome: hover tooltips" section doc.
 
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
 keeps it applied and closes the box), `F2` to inline-rename the selected file or
