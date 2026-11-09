@@ -17,8 +17,11 @@ this suite shortens through `fm.app.set_style`/`fm.refresh_tooltip_delay`
 
 import time
 
+import quadraui
+
 from conftest import find_row as _find_row
 from quadraui_files import app as _app_module
+from quadraui_files import cli as _cli_module
 from quadraui_files import FileManager
 from quadraui_files.app import ENTER_KEY, _key_event
 
@@ -199,12 +202,11 @@ def test_continued_movement_within_a_tree_row_re_arms_the_auto_dismiss_window(sa
 
 
 def test_hover_tooltips_disabled_flag_suppresses_the_delayed_show(sample_tree):
-    """`cli.py` sets `hover_tooltips_enabled = False` right before
-    `run_native()`: `QuiAppWaker.post_after` is never delivered while a
-    native window owns the run loop (see `app.py`'s "chrome: hover
-    tooltips" section doc), so arming it there would only ever queue a
-    dead timer. With the flag off, `_on_hover_entered` must not arm one at
-    all -- waiting past the delay must never show a tooltip."""
+    """`hover_tooltips_enabled` is a plain opt-out any caller can flip --
+    `FileManager` itself never does, and neither does `cli.py` anymore (see
+    the "chrome: hover tooltips" section doc). With the flag off,
+    `_on_hover_entered` must not arm a show timer at all -- waiting past
+    the delay must never show a tooltip."""
     fm = FileManager(sample_tree, width=160, height=30)
     _shorten_tooltip_delay(fm)
     fm.hover_tooltips_enabled = False
@@ -213,6 +215,54 @@ def test_hover_tooltips_disabled_flag_suppresses_the_delayed_show(sample_tree):
     _move_to(fm, x, y)
     _wait_past_the_delay_and_tick(fm)
     assert str(sample_tree / "alpha") not in fm.app.screen()
+
+
+def test_cli_native_branch_leaves_tooltips_enabled_and_a_hover_still_fires(sample_tree, monkeypatch):
+    """`cli.main`'s `--native` arm sets `native_window_chrome`/`native_tray`
+    right before the one call that opens a real window, but, since
+    `run_native` now swaps `QuiAppWaker`'s delivery onto the live native
+    backend (quadraui#2278), it no longer flips `hover_tooltips_enabled`
+    off first -- that opt-out line is gone from both `cli.py` and this
+    module's own `__main__`.
+
+    A real native window/display isn't available headlessly, so this
+    stubs only `QuiApp.run_native` itself (not `FileManager` or the rest
+    of `cli.main`'s own code) to drive the exact same `push_event`/`step`
+    hover dance the other tests in this file drive against the headless
+    backend -- the closest stand-in for that native waker path, proving
+    both the flag and the pipeline it gates still work on the real code
+    path `cli.main` takes for `--native`."""
+    captured: dict = {}
+
+    def _fake_run_native(self, title=None):
+        fm = captured["fm"]
+        x, y = _find_row(fm, "alpha")
+        _move_to(fm, x, y)
+        _wait_past_the_delay_and_tick(fm)
+        alpha_path = str(sample_tree / "alpha")
+        captured["hover_tooltips_enabled"] = fm.hover_tooltips_enabled
+        captured["shown_after_delay"] = alpha_path in fm.app.screen()
+
+        _move_to(fm, _OFF_X, _OFF_Y)
+        captured["hidden_after_leave"] = alpha_path not in fm.app.screen()
+
+    monkeypatch.setattr(quadraui.QuiApp, "run_native", _fake_run_native, raising=False)
+
+    real_file_manager = _cli_module.FileManager
+
+    def _spy_file_manager(*args, **kwargs):
+        fm = real_file_manager(*args, **kwargs)
+        _shorten_tooltip_delay(fm)
+        captured["fm"] = fm
+        return fm
+
+    monkeypatch.setattr(_cli_module, "FileManager", _spy_file_manager)
+
+    assert _cli_module.main([str(sample_tree), "--native"]) == 0
+
+    assert captured["hover_tooltips_enabled"] is True
+    assert captured["shown_after_delay"] is True
+    assert captured["hidden_after_leave"] is True
 
 
 # --- details row --------------------------------------------------------------

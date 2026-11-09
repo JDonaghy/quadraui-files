@@ -76,12 +76,6 @@ def main(argv: list[str] | None = None) -> int:
         # the *built* backend (`_NATIVE_BACKEND`), not the host OS.
         fm.native_window_chrome = _NATIVE_BACKEND == "macos"
         fm.native_tray = _NATIVE_BACKEND in ("gtk", "macos", "win")
-        # Hover tooltips ride `QuiAppWaker.post_after`, which `run_native`
-        # never delivers (see `FileManager.hover_tooltips_enabled`'s own
-        # doc, and the "chrome: hover tooltips" section's) -- opt out here,
-        # the same opt-in-right-before-`run_native` story the two flags
-        # just above have, so no dead post ever gets queued.
-        fm.hover_tooltips_enabled = False
         try:
             fm.app.run_native(title=fm.window_title)
         except _Quit:

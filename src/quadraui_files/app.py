@@ -1229,27 +1229,14 @@ ACCELERATORS = [
 # longer show a tooltip at all -- only a real pointer hover does, so the
 # tooltip never follows the keyboard the way the old pseudo-hover did.
 #
-# `QuiAppWaker.post_after` only ever reaches whichever backend `QuiApp`'s
-# own current waker points at, and `run_native` does not swap that: a
-# window opened via `run_native` has no `Backend::waker`-reachable accessor
-# on `GtkRunner`/`MacRunner`/`WinRunner` today (see `QuiApp.
-# current_waker`'s own doc, `quadraui-py/src/lib.rs`), so a post made while
-# a native window is open queues against the dormant headless backend and
-# is only delivered, as one lump-sum burst, once the window closes. That
-# means this whole delayed-show/auto-dismiss pipeline cannot ever deliver a
-# tooltip on the native backend as things stand upstream -- tracked as
-# BLOCKED_ON_UPSTREAM against quadraui (the fix is a `run_native`-side
-# waker swap, not something this app can work around). Posting while a
-# native window is open is also a documented anti-pattern regardless of
-# whether delivery would matter: each queued post holds a strong
-# reference and spawns a background thread, so an app that posts on every
-# hover change for a long native session accumulates both for the window's
-# whole lifetime. `hover_tooltips_enabled` (set `False` by `cli.py` right
-# before `run_native()`, the same opt-in-flag pattern `native_window_chrome`/
-# `native_tray` already use) gates `_on_hover_entered`'s `post_after` off
-# entirely on native, so no post is ever queued there -- no tooltip shows on
-# native today, but nothing accumulates either, and flipping the flag back
-# once the upstream waker swap lands is the entire native fix.
+# `QuiAppWaker.post_after` reaches whichever backend `QuiApp`'s own current
+# waker points at. `run_native` now swaps that waker onto the live
+# GTK/AppKit/Win32 backend before handing control to its event loop (see
+# `QuiApp.current_waker`'s own doc, `quadraui-py/src/lib.rs`, fixed in
+# quadraui#2278), so a post made while a native window is open is delivered
+# to that window the same way it is on the TUI/headless backends --
+# `hover_tooltips_enabled` stays `True` on every backend, including native;
+# neither `cli.py` nor this module's own `__main__` block opts it back out.
 #
 # `anchor` is a `(x, y, width, height)` rect in this app's own cell grid --
 # the same units `line_height`/`chrome_line_height`/`viewport` already
@@ -1555,14 +1542,12 @@ class FileManager:
         self._hover_gen = 0
         self._tooltip_visible = False
         self._tooltip_delay_ms = _DEFAULT_TOOLTIP_DELAY_MS
-        # Opt-in, same `native_window_chrome`/`native_tray` story just below
-        # but inverted: `True` by default (every hover timer this app arms
-        # is safe and live on the TUI backend `self.app`/headless tests
-        # always talk to), and set `False` by `cli.py`/this module's own
-        # `__main__` right before a `run_native()` call -- see the "chrome:
-        # hover tooltips" section's own doc for why `QuiAppWaker.post_after`
-        # specifically cannot be armed while a native window owns the run
-        # loop. `FileManager` never sets this itself.
+        # `True` on every backend -- the TUI/headless backends `self.app`/
+        # headless tests always talk to, and native too, since `run_native`
+        # now swaps `QuiAppWaker`'s delivery onto the live native backend
+        # (see the "chrome: hover tooltips" section's own doc). `FileManager`
+        # never sets this itself; neither does `cli.py`/this module's own
+        # `__main__`.
         self.hover_tooltips_enabled = True
         # Status-bar colors, same placeholder-then-overwrite dance as the
         # metrics above: `_apply_system_theme` (below) picks the real
@@ -1851,9 +1836,8 @@ class FileManager:
         so a timer still in flight for the previous hover can never show a
         stale tooltip once it fires. Arms a fresh delayed `show` only when
         the new hit is one of the three kinds this app has a tooltip for,
-        and only where `hover_tooltips_enabled` says `self.waker.post_after`
-        is actually safe/live -- see the "chrome: hover tooltips" section's
-        own doc for why that excludes `run_native`."""
+        and only where `hover_tooltips_enabled` says a tooltip should show at
+        all -- see the "chrome: hover tooltips" section's own doc."""
         widget_id = event["MouseEntered"]["widget"]
         target = self._hover_target_for(widget_id, event.get("hit") or {})
         self._hover_gen += 1
@@ -3309,11 +3293,6 @@ if __name__ == "__main__":
         # (`_NATIVE_BACKEND`), not the host OS.
         fm.native_window_chrome = _NATIVE_BACKEND == "macos"
         fm.native_tray = _NATIVE_BACKEND in ("gtk", "macos", "win")
-        # Hover tooltips ride `QuiAppWaker.post_after`, which `run_native`
-        # never delivers (see `hover_tooltips_enabled`'s own doc, and the
-        # "chrome: hover tooltips" section's) -- opt out here, same story
-        # as the two flags just above.
-        fm.hover_tooltips_enabled = False
         try:
             fm.app.run_native(title=fm.window_title)
         except _Quit:
