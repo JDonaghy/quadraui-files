@@ -2,18 +2,19 @@
 # quadraui-files environment bootstrap -- a sourceable stand-in for a generated
 # virtualenv, tracked in git on purpose.
 #
-# `quadraui` is compiled from source, so it only ever lives inside a virtualenv:
-# a freshly checked-out clone or git worktree has no environment at all, and the
-# documented entry point
+# `quadraui` is a third-party install, so it only ever lives inside a
+# virtualenv: a freshly checked-out clone or git worktree has no environment
+# at all, and the documented entry point
 #
 #     . .venv/bin/activate && pytest -q
 #
 # would otherwise die on the `.` itself ("cannot open .venv/bin/activate"),
 # before pytest ever ran. Shipping this file at that exact path makes the entry
-# point self-provisioning: sourcing it resolves -- building once per pinned quadraui
-# commit if needed, see scripts/bootstrap-env.sh -- an environment that can
-# import `quadraui` and `pytest`, then puts that environment first on PATH the
-# way a real activate script would.
+# point self-provisioning: sourcing it resolves -- installing the pinned
+# quadraui wheel from PyPI once per version if needed, see
+# scripts/bootstrap-env.sh -- an environment that can import `quadraui` and
+# `pytest`, then puts that environment first on PATH the way a real activate
+# script would.
 #
 # Provisioning an in-tree virtualenv (`python3.12 -m venv .venv`) overwrites
 # this file with the real activate script, which is fine: a provisioned venv

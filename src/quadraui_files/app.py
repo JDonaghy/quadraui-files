@@ -84,6 +84,12 @@ installed quadraui's `Tree`/`DataTable` row-click events don't report which
 mouse button triggered them, so a right click on a row can't be told apart
 from a left one here -- `Menu` is the keyboard stand-in.
 
+Hot reload: run with `--reload` and the app re-imports its own module whenever
+the source file changes, keeping the running session's state (open tabs,
+cursor, filters, dragged split ratios) and surviving a broken edit with the
+last good code. The wiring -- and exactly what does and doesn't survive -- is
+documented on `FileManager.enable_hot_reload`.
+
 The overlay surfaces (`show_message_dialog` / `show_context_menu` /
 `show_toast` / `show_tooltip`), the platform service `send_notification`, the
 OS actions (`open_path` / `reveal_in_file_manager` / `move_to_trash` /
@@ -113,12 +119,21 @@ import mimetypes
 import os
 import struct
 import sys
+import threading
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from quadraui import InternalError, QuadrauiError, QuiApp
+from quadraui.app.hot_reload import (
+    HOT_RELOAD_WAKE,
+    ModuleWatcher,
+    rebind_callable,
+    reload_modules,
+    resolve_modules,
+    restore_modules,
+)
 
 try:
     # Which native backend (if any) a `run_native()` call on this build would
@@ -1565,7 +1580,18 @@ class FileManager:
         # by `_set_selected_file` -- see that method for why `_render` only
         # reads this instead of reading+decoding the file itself every frame.
         self._preview_leaf = preview_leaf(self.selected_file, capacity=self._preview_content_capacity())
-        self.app = QuiApp(width, height, render=self._render)
+        # Hot-reload state (off by default -- `enable_hot_reload` turns it on).
+        # The render/handler the engine is given below are trampolines that
+        # re-resolve `self._render_frame`/`self._handle` on every call, so a
+        # reload only has to swap `self.__class__` and never re-register into
+        # `QuiApp` (which a reload triggered from inside an event dispatch
+        # could not do anyway -- reentrant borrow).
+        self.reload_error: BaseException | None = None  # last failed reload, shown in the status bar
+        self.reload_count = 0            # successful reloads so far
+        self._hr_watcher: ModuleWatcher | None = None
+        self._hr_thread: tuple[threading.Event, threading.Thread] | None = None
+        self._hr_rollback = None         # armed for the first frame after a reload
+        self.app = QuiApp(width, height, render=lambda: self._render_frame())
         # Obtained here, from top-level code: `actions()` is the only way the
         # handler can reach an overlay/OS call, and it is unreachable once a
         # run loop owns the app. See the module doc.
@@ -1573,9 +1599,10 @@ class FileManager:
         # Obtained here too, same "once, from top-level code, shared with
         # the handler" story `self.actions` has: `_on_hover_entered` posts
         # the delayed show/auto-dismiss timers this section's own doc
-        # describes through this handle.
+        # describes through this handle, and `enable_hot_reload`'s watcher
+        # thread posts its wake through it.
         self.waker = self.app.waker()
-        self.app.set_handler(self._handle)
+        self.app.set_handler(lambda event: self._handle(event))
         self._line_height = self.app.line_height()
         self._chrome_line_height = self.app.chrome_line_height()
         self._char_width = self.app.char_width()
@@ -2537,6 +2564,154 @@ class FileManager:
         self.app.push_event(event)
         self.app.step()
 
+    # --- hot reload ----------------------------------------------------------
+    #
+    # Off by default; `quadraui-files --reload` turns it on (see cli.py). The
+    # building blocks come from `quadraui.app.hot_reload` (shipped inside the
+    # `quadraui` wheel): a `ModuleWatcher` stats the watched modules' source
+    # files, a daemon thread posts `HOT_RELOAD_WAKE` through the app's waker
+    # when one changes, and the wake event -- dispatched on the run loop's own
+    # thread -- does the re-import there. `QuiApp` itself has no
+    # `enable_hot_reload` (that lives on the `quadraui.app.App` wrapper), so
+    # this class wires the same pieces directly. What survives a reload:
+    #
+    #   * Everything on `self` -- the lazily built model, open tabs, cursor,
+    #     filter/sort state. A reload only swaps `self.__class__` for the
+    #     reloaded class of the same name; every attribute already on the
+    #     instance stays put, and the trampolines registered in `__init__`
+    #     pick the new code up on their next call.
+    #   * Framework widget state -- scroll offsets, the dragged split ratios,
+    #     the active tab -- lives in the engine, keyed by widget id, and is
+    #     never touched.
+    #
+    # What does not: module-level globals are re-executed (that is what
+    # re-importing means), new attributes an edited `__init__` would set are
+    # absent here (read those with `getattr(self, name, default)`), and `Node`
+    # objects already in the model keep the class they were built with --
+    # press `r` to re-read a folder with the new code. A broken edit keeps the
+    # last good code running and sets `self.reload_error`, which the status
+    # bar shows until a later successful reload clears it.
+
+    def enable_hot_reload(self, *modules, interval: float | None = 0.5) -> None:
+        """Watch `modules` (module objects or dotted names, re-imported in the
+        order given -- list a dependency before the module importing from it)
+        and reload them when their source files change. Default: the module
+        this instance's class comes from, which must be an importable module,
+        not a `__main__` script.
+
+        With `interval` (seconds) a daemon thread checks the files and wakes
+        the event loop on a change, so `run_tui()`/`run_native()` pick an edit
+        up with no input; with `interval=None` nothing happens until
+        `reload_if_changed()` is called (the shape tests use). Calling this
+        again replaces the watch list."""
+        self.disable_hot_reload()
+        if not modules:
+            modules = (sys.modules[type(self).__module__],)
+        self._hr_watcher = ModuleWatcher(resolve_modules(modules))
+        if interval is not None:
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._watch_loop,
+                args=(self.waker, interval, stop),
+                name="quadraui-files-hot-reload",
+                daemon=True,
+            )
+            self._hr_thread = (stop, thread)
+            thread.start()
+
+    def disable_hot_reload(self) -> None:
+        """Stop watching (and stop the watcher thread, if any)."""
+        if self._hr_thread is not None:
+            stop, thread = self._hr_thread
+            stop.set()
+            thread.join(timeout=2.0)
+            self._hr_thread = None
+        self._hr_watcher = None
+
+    def _watch_loop(self, waker, interval: float, stop: threading.Event) -> None:
+        """Post one `HOT_RELOAD_WAKE` per distinct change. A wake already in
+        flight covers edits landing before the pump drains it (the reload
+        reads the file as it then is), and `reload()` re-snapshots the watcher
+        even when a re-import fails, so `changed()` going quiet re-arms the
+        next post."""
+        posted = False
+        while not stop.wait(interval):
+            watcher = self._hr_watcher
+            if watcher is None or not watcher.changed():
+                posted = False
+                continue
+            if not posted:
+                posted = True
+                waker.post(HOT_RELOAD_WAKE)
+
+    def reload_if_changed(self) -> bool:
+        """`reload()` when a watched source file changed since the last check,
+        else `False`. Needs `enable_hot_reload()` first."""
+        if self._hr_watcher is None:
+            raise RuntimeError("enable_hot_reload() has not been called")
+        if not self._hr_watcher.changed():
+            return False
+        return self.reload()
+
+    def reload(self) -> bool:
+        """Re-import every watched module now and point this instance at the
+        new code. On a broken edit the previous code stays in place, the
+        exception lands on `reload_error`, and this returns `False`. `True`
+        means the re-import and the class swap succeeded -- a render that
+        raises with the new code is rolled back in `_render_frame` instead, so
+        read `reload_error` after the next frame, not this return value, to
+        know a reload stuck."""
+        watcher = self._hr_watcher
+        if watcher is None:
+            raise RuntimeError("enable_hot_reload() has not been called")
+        modules = watcher.modules
+        watcher.snapshot()
+        try:
+            saved = reload_modules(modules)
+        except Exception as exc:  # a broken edit must not take the app down
+            self.reload_error = exc
+            return False
+        reloaded = {m.__name__: m for m in modules}
+        rebound: dict = {}
+
+        def rollback() -> None:
+            restore_modules(saved)
+            for instance, cls in rebound.values():
+                instance.__class__ = cls
+
+        try:
+            # The one swap: `rebind_callable` points `self.__class__` at the
+            # reloaded class of the same qualified name (recording the old one
+            # for `rollback`); the trampolines take it from there. The
+            # re-resolved bound method it returns is never registered -- the
+            # trampolines already re-resolve per call.
+            rebind_callable(self._render, reloaded, rebound)
+        except Exception as exc:
+            rollback()
+            self.reload_error = exc
+            return False
+        self._hr_rollback = rollback
+        self.reload_error = None
+        self.reload_count += 1
+        return True
+
+    def _render_frame(self) -> dict:
+        """The render entry the engine's trampoline calls: `_render` plus the
+        hot-reload safety net. The first frame after a reload runs with a
+        rollback armed; if the new code raises there, the previous module
+        namespaces and class go back, `reload_error` records why, and that
+        frame renders with the last good code."""
+        rollback, self._hr_rollback = self._hr_rollback, None
+        if rollback is None:
+            return self._render()
+        try:
+            return self._render()
+        except Exception as exc:
+            rollback()
+            self.reload_error = exc
+            self.reload_count -= 1
+            return self._render()
+
     # --- render + handle -----------------------------------------------------
 
     def _details_pane(self) -> dict:
@@ -2747,6 +2922,9 @@ class FileManager:
         ]
         if self.message:
             left.append(self._segment(f" {self.message} "))
+        if self.reload_error is not None:
+            exc = self.reload_error
+            left.append(self._segment(f" reload failed: {type(exc).__name__} ", accent=True, bold=True))
         if self.filter_text:
             left.append(self._segment(f' filter: "{self.filter_text}" '))
         open_n = len(self.open)
@@ -2863,12 +3041,18 @@ class FileManager:
         }
 
     def _handle(self, event) -> None:
-        """Per-event entry point: primes native chrome (C13) on the very
-        first dispatch of a run that opted into it, then `_dispatch` does
-        the real work, then this syncs the window title against wherever
-        the cursor landed -- after every event, not just a navigation one,
-        so it still catches a `TabClosed`/`_forget` pulling the cursor back
-        onto a different node with no dedicated "move" call of its own."""
+        """Per-event entry point: a hot-reload wake from the watcher thread
+        runs the reload first (on the dispatch thread, as it must be), then
+        `_prime_native_chrome` (C13) on the very first dispatch of a run that
+        opted into it, then `_dispatch` does the real work, then this syncs
+        the window title against wherever the cursor landed -- after every
+        event, not just a navigation one, so it still catches a
+        `TabClosed`/`_forget` pulling the cursor back onto a different node
+        with no dedicated "move" call of its own."""
+        if isinstance(event, dict) and event.get("User") == HOT_RELOAD_WAKE:
+            if self._hr_watcher is not None:
+                self.reload_if_changed()
+            return
         self._prime_native_chrome()
         self._dispatch(event)
         self._sync_window_title()
@@ -3223,14 +3407,17 @@ def _wrap_quit(fm: FileManager) -> None:
     loop: `_on_menu_item` can't raise `_Quit` itself (it has no idea this
     wrapper exists), so it just sets `fm._quit_requested` and this checks
     that flag right after every dispatch, same as it checks the plain
-    keystroke above."""
-    inner = fm._handle
+    keystroke above.
+
+    `fm._handle` is looked up per dispatch, not captured once, so a hot
+    reload's `__class__` swap (see `enable_hot_reload`) takes effect here
+    without re-wrapping."""
 
     def handler(event) -> None:
         key = _event_key(event) if isinstance(event, dict) else None
         if fm.edit_mode is None and key in ("q", "Escape"):
             raise _Quit
-        inner(event)
+        fm._handle(event)
         if fm._quit_requested:
             raise _Quit
 
@@ -3277,6 +3464,9 @@ if __name__ == "__main__":
         sys.exit(0)
 
     fm = FileManager(root.resolve())
+
+    if "--reload" in flags:
+        fm.enable_hot_reload()  # re-import this module on save, keeping state
 
     # --- the only platform-specific line is the run call below --------------
     if "--tui" in flags:

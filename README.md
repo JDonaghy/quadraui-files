@@ -12,33 +12,16 @@ Seeded from quadraui-py's `examples/file_manager.py` and grown into a standalone
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"          # builds quadraui-py from the pinned quadraui commit (needs Rust + maturin)
+pip install -e ".[dev]"          # pulls the pinned quadraui wheel from PyPI (prebuilt, no Rust)
 quadraui-files                   # headless: Python drives the loop, prints the final screen
 quadraui-files ~/some/dir --tui  # real terminal
-quadraui-files ~/some/dir --native   # native OS window -- needs a native build, see below
+quadraui-files ~/some/dir --native   # native OS window (macOS/Windows wheels; Linux is TUI-only)
+quadraui-files ~/some/dir --tui --reload  # hot-reload edits to the app's own source
 quadraui-files ~/some/dir --dump # descriptor dump
 ```
 
-### Native window builds
-
-A source build of quadraui-py compiles the terminal backend only: `run_native()` exists
-only when one of its native Cargo features (`macos`, `gtk`, `win`) is passed to maturin.
-`pip install -e ".[dev]"` passes none, so `--native` on that build exits with a rebuild
-hint. To enable it, rebuild quadraui with the feature for your platform (`macos` shown;
-substitute the commit pinned in `pyproject.toml`):
-
-```bash
-MATURIN_PEP517_ARGS="--features macos" pip install --force-reinstall --no-deps --no-cache-dir \
-  "quadraui @ git+https://github.com/JDonaghy/quadraui.git@<pin>#subdirectory=quadraui-py"
-python -c "from quadraui import QuiApp; print(hasattr(QuiApp, 'run_native'))"   # True
-```
-
-`--no-cache-dir` matters: pip caches the built wheel by commit, not by feature set, so
-without it pip reinstalls the terminal-only wheel it built earlier. `gtk` also needs the
-system GTK development packages.
-
-The virtualenv is not optional: `quadraui` is only ever installed into it (it is built
-from source, not pulled from PyPI), so `pytest` must run with that env active —
+The virtualenv is not optional: `quadraui` is only ever installed into it (never
+into the system Python), so `pytest` must run with that env active —
 
 ```bash
 . .venv/bin/activate && pytest -q
@@ -56,9 +39,9 @@ sh scripts/test.sh tests/test_actions.py # one file
 ```
 
 Both go through `scripts/bootstrap-env.sh`, which uses the active environment when it can
-already import `quadraui`, falls back to an in-tree `.venv`, and otherwise builds a
-virtualenv shared across worktrees and keyed by the pinned quadraui commit (the first
-build is a several-minute Rust compile; later runs reuse it). Provisioning a real in-tree
+already import `quadraui`, falls back to an in-tree `.venv`, and otherwise creates a
+virtualenv shared across worktrees and keyed by the pinned quadraui version (a prebuilt
+wheel install — seconds, no Rust compile). Provisioning a real in-tree
 virtualenv (`python3.12 -m venv .venv`, as under [Run](#run)) overwrites the bootstrap
 with the generated activate script, which is fine — a provisioned venv needs no
 bootstrap. `git` then reports `.venv/bin/activate` as modified until
@@ -134,8 +117,8 @@ the same divider ratio.
 
 ## quadraui dependency
 
-quadraui-py lags PyPI, so the binding is built from the quadraui repo at a **pinned
-develop commit** (see `pyproject.toml`). Bump that SHA to pick up new quadraui features.
+quadraui-py is released on PyPI as `quadraui`; this app pins it exactly (see
+`pyproject.toml`, currently 0.10.1). Bump the version to pick up new quadraui features.
 
 ## License
 

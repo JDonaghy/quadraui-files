@@ -15,10 +15,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # quadraui-py is built from source (the pinned quadraui@develop git dep in
-      # pyproject), so the install needs a Rust toolchain + maturin.
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install (builds quadraui-py from the pinned quadraui commit)
+      # quadraui ships prebuilt PyPI wheels since 0.10.1, so the install is a
+      # plain download -- no Rust toolchain needed anymore.
+      - name: Install (pulls the pinned quadraui wheel from PyPI)
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"

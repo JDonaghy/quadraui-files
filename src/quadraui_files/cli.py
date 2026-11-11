@@ -1,4 +1,4 @@
-"""Console entry point: `quadraui-files [PATH] [--tui|--native|--dump]`.
+"""Console entry point: `quadraui-files [PATH] [--tui|--native|--dump|--reload]`.
 
 The only platform-specific line is the `run_*` call — the same `FileManager`
 descriptor code drives every backend.
@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     fm = FileManager(root.resolve())
+
+    if "--reload" in flags:
+        # Watch the app's own module and re-import it on save, keeping the
+        # running session's state -- see `FileManager.enable_hot_reload`.
+        fm.enable_hot_reload()
 
     if "--tui" in flags:
         _wrap_quit(fm)  # real terminal: raw mode, live redraw on key events

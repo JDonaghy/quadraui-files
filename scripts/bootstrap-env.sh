@@ -5,11 +5,11 @@
 #
 #     python=$(sh scripts/bootstrap-env.sh)
 #
-# Why this exists: `quadraui` is compiled from source, so it only ever lives in
-# a virtualenv -- a bare `pytest` in a fresh clone or git worktree cannot import
-# it. Automated runners check out a clean worktree and run a single command, so
-# the environment has to be established rather than assumed to exist. Both
-# entry points share this resolver: `scripts/test.sh` and the sourceable
+# Why this exists: a bare `pytest` in a fresh clone or git worktree cannot
+# import `quadraui` unless it has been installed somewhere first. Automated
+# runners check out a clean worktree and run a single command, so the
+# environment has to be established rather than assumed to exist. Both entry
+# points share this resolver: `scripts/test.sh` and the sourceable
 # `.venv/bin/activate` bootstrap.
 set -eu
 
@@ -38,20 +38,15 @@ if [ -x .venv/bin/python ] && has_deps .venv/bin/python; then
 fi
 
 # 3. Otherwise bootstrap a virtualenv shared by every worktree on this machine,
-#    keyed by the pinned quadraui commit: a new pin builds once into a new
-#    venv, an unchanged pin reuses that build. Keyed because building
-#    quadraui-py is a multi-minute Rust compile that must not repeat per
-#    worktree.
-requirement=$(sed -n 's/^[[:space:]]*"\(quadraui @ git+[^"]*\)".*/\1/p' pyproject.toml | head -n 1)
+#    keyed by the pinned quadraui version: a bump installs once into a new
+#    venv, an unchanged pin reuses it. Install is a prebuilt-wheel download,
+#    so unlike the old git-pin era there is no Rust compile to keep warm.
+requirement=$(sed -n 's/^[[:space:]]*"\(quadraui==[^"]*\)".*/\1/p' pyproject.toml | head -n 1)
 if [ -z "$requirement" ]; then
-    echo "bootstrap-env.sh: no 'quadraui @ git+...' dependency in pyproject.toml" >&2
+    echo "bootstrap-env.sh: no 'quadraui==...' dependency in pyproject.toml" >&2
     exit 1
 fi
-pin=$(printf '%s' "$requirement" | sed -n 's/.*quadraui\.git@\([0-9A-Za-z]*\).*/\1/p')
-if [ -z "$pin" ]; then
-    echo "bootstrap-env.sh: no pinned quadraui commit in: $requirement" >&2
-    exit 1
-fi
+pin=${requirement#quadraui==}
 
 cache_home=${XDG_CACHE_HOME:-$HOME/.cache}
 venv=${QUADRAUI_FILES_VENV:-$cache_home/quadraui-files/venv-$pin}
@@ -65,11 +60,7 @@ if [ ! -x "$venv/bin/python" ] || [ ! -f "$venv/pyvenv.cfg" ]; then
 fi
 
 if ! "$venv/bin/python" -c 'import quadraui' >/dev/null 2>&1; then
-    # Keep the Rust artifacts out of pip's throwaway build directory so the
-    # next bootstrap (a new pin, or a wiped venv) links against a warm cache.
-    CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$cache_home/quadraui-files/cargo}
-    export CARGO_TARGET_DIR
-    echo "bootstrap-env.sh: building $requirement (Rust compile, several minutes)" >&2
+    echo "bootstrap-env.sh: installing $requirement from PyPI" >&2
     "$venv/bin/python" -m pip install --quiet "$requirement" >&2
 fi
 

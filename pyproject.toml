@@ -12,11 +12,12 @@ license = { text = "MIT" }
 authors = [{ name = "John Donaghy" }]
 keywords = ["quadraui", "tui", "gui", "file-manager", "cross-platform"]
 
-# quadraui-py lags PyPI, so the Python bindings are built from the quadraui
-# repo at a pinned develop commit. Bump this SHA to pick up new quadraui
-# features (requires a Rust toolchain + maturin at install time — see CI).
+# quadraui-py is on PyPI as `quadraui`; 0.10.1 is the first release with
+# everything this app uses (deferred actions, native chrome, and the
+# `quadraui.app.hot_reload` building blocks `--reload` runs on). Prebuilt
+# wheels: macOS/Windows (native window + TUI) and Linux (TUI-only).
 dependencies = [
-    "quadraui @ git+https://github.com/JDonaghy/quadraui.git@fd370c2d73d8f3acbf12f102b9c188178212e110#subdirectory=quadraui-py",
+    "quadraui==0.10.1",
 ]
 
 [project.optional-dependencies]
@@ -28,10 +29,6 @@ quadraui-files = "quadraui_files.cli:main"
 [project.urls]
 Homepage = "https://github.com/JDonaghy/quadraui-files"
 quadraui = "https://github.com/JDonaghy/quadraui"
-
-[tool.hatch.metadata]
-# Required for the quadraui @ git+... direct-reference dependency above.
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quadraui_files"]
