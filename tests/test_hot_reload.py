@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from quadraui.app.hot_reload import restore_modules
+
 import quadraui_files.app as app_module
 from quadraui_files import FileManager
 from quadraui_files.app import DOWN_KEY, ENTER_KEY, HOT_RELOAD_WAKE, _key_event
@@ -53,6 +55,22 @@ class _TempModule:
     def write(self, source: str) -> None:
         self.path.write_text(textwrap.dedent(source))
         _touch(self.path)
+
+
+@pytest.fixture(autouse=True)
+def _restore_the_real_app_module():
+    """A successful reload of the real `quadraui_files.app` re-executes the
+    module in place, replacing every module-level name (`FileManager`,
+    `_Quit`, ...) with fresh objects, while everything that imported from it
+    once at startup -- `quadraui_files/__init__`'s re-export, other test
+    modules collected earlier -- still holds the originals. That identity
+    split leaks past this file: `pytest.raises(_Quit)` in
+    test_keys_after_click raises-misses the fresh class and fails the suite.
+    Put the pre-test namespace back after every test, the exact restore a
+    reload rollback runs (`restore_modules` over a pre-reload snapshot)."""
+    saved = {app_module.__name__: dict(app_module.__dict__)}
+    yield
+    restore_modules(saved)
 
 
 @pytest.fixture
