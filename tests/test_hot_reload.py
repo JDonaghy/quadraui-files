@@ -183,6 +183,38 @@ def test_the_watcher_thread_notices_an_edit_and_the_pump_reloads(fm, tmp_path):
     assert helper.module.VALUE == 2
 
 
+def test_a_wake_the_backend_loses_does_not_stall_the_watch(fm, tmp_path, monkeypatch):
+    """Regression: `_watch_loop` used to post a single wake per distinct
+    change and latch until the watcher re-armed -- but only the wake
+    handler's `reload()` re-arms it, so a wake the backend drops or
+    delivers while the handler cannot reload left the watch permanently
+    mute (observed live: a --reload native window stopped picking up
+    saves mid-session). Simulate that lost first wake, then assert the
+    thread posts again and the next pump applies the edit."""
+    helper = _TempModule(tmp_path, "VALUE = 1\n")
+    fm.enable_hot_reload(helper.module, interval=0.05)
+    real = fm.reload_if_changed
+    drop = [True]
+
+    def lose_the_first_wake():
+        if drop[0]:
+            drop[0] = False
+            return False  # consumed without a reload: watcher never re-armed
+        return real()
+
+    monkeypatch.setattr(fm, "reload_if_changed", lose_the_first_wake)
+    helper.write("VALUE = 2\n")
+
+    deadline = time.time() + 3
+    while fm.reload_count == 0:
+        assert time.time() < deadline, "a lost wake stalled the watch forever"
+        fm.app.step()  # each pump drains waker-posted events
+        time.sleep(0.05)
+
+    assert fm.reload_error is None
+    assert helper.module.VALUE == 2
+
+
 def test_enable_disable_cycle_starts_and_stops_the_watcher_thread(fm):
     fm.enable_hot_reload(interval=0.05)
     assert fm._hr_thread is not None

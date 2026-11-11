@@ -2629,20 +2629,25 @@ class FileManager:
         self._hr_watcher = None
 
     def _watch_loop(self, waker, interval: float, stop: threading.Event) -> None:
-        """Post one `HOT_RELOAD_WAKE` per distinct change. A wake already in
-        flight covers edits landing before the pump drains it (the reload
-        reads the file as it then is), and `reload()` re-snapshots the watcher
-        even when a re-import fails, so `changed()` going quiet re-arms the
-        next post."""
-        posted = False
+        """Post a `HOT_RELOAD_WAKE` on every tick a change sits undrained. A
+        wake already in flight covers edits landing before the pump drains it
+        (the reload reads the file as it then is), and once a wake does get
+        dispatched `reload()` re-snapshots the watcher -- even when the
+        re-import fails -- so an unchanged file goes quiet and the posts stop.
+
+        Posting per tick instead of once per distinct change is the safety
+        half: a backend that drops or coalesces a wake (observed live on the
+        macOS native loop, where an idle window never dispatched one) left
+        the single posted wake consumed, `changed()` permanently True, and
+        the watch dead for the rest of the session -- the reload that
+        re-arms the watcher never ran, so no further wake was ever posted.
+        Repeated posts make the next tick heal that; each extra wake is
+        cheap, since `reload_if_changed` no-ops once the watcher re-arms."""
         while not stop.wait(interval):
             watcher = self._hr_watcher
             if watcher is None or not watcher.changed():
-                posted = False
                 continue
-            if not posted:
-                posted = True
-                waker.post(HOT_RELOAD_WAKE)
+            waker.post(HOT_RELOAD_WAKE)
 
     def reload_if_changed(self) -> bool:
         """`reload()` when a watched source file changed since the last check,
