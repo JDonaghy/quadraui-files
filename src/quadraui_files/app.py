@@ -2925,6 +2925,8 @@ class FileManager:
         if self.reload_error is not None:
             exc = self.reload_error
             left.append(self._segment(f" reload failed: {type(exc).__name__} ", accent=True, bold=True))
+        if self.reload_count:  # hot reload: live proof each save took, state intact
+            left.append(self._segment(f" reloads: {self.reload_count} "))
         if self.filter_text:
             left.append(self._segment(f' filter: "{self.filter_text}" '))
         open_n = len(self.open)

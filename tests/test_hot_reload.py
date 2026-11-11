@@ -102,6 +102,16 @@ def test_reimport_keeps_the_session_and_rebinds_the_class(fm):
     assert fm.cursor.name == "alpha"
 
 
+def test_a_successful_reload_shows_a_live_counter_in_the_status_bar(fm):
+    fm.enable_hot_reload(interval=None)
+    assert "reloads" not in fm.app.screen()
+
+    _touch(Path(app_module.__file__))
+    assert fm.reload_if_changed() is True
+
+    assert "reloads: 1" in fm.app.screen()
+
+
 def test_a_broken_edit_keeps_the_last_good_code_and_surfaces_the_error(fm, tmp_path):
     helper = _TempModule(tmp_path, "VALUE = 1\n")
     fm.enable_hot_reload(app_module, helper.module, interval=None)
