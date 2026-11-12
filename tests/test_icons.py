@@ -7,8 +7,14 @@ This file is the one place that flips it, to cover the glyph half too."""
 
 from quadraui_files import FileManager
 from quadraui_files.app import (
+    _CODICON_CODE_GLYPH,
     _CODICON_FILE_GLYPH,
     _CODICON_FOLDER_GLYPH,
+    _CODICON_JSON_GLYPH,
+    _CODICON_MD_GLYPH,
+    _CODICON_MEDIA_GLYPH,
+    _CODICON_PDF_GLYPH,
+    _CODICON_ZIP_GLYPH,
     DOWN_KEY,
     ENTER_KEY,
     _key_event,
@@ -54,13 +60,63 @@ def test_details_row_shows_the_file_codicon_once_nerd_fonts_are_on(tmp_path):
     assert "readme.txt" in fm.app.screen()
 
     _enable_nerd_fonts(fm)
-    # A tree-cursor move forces the repaint this assertion needs, without
-    # selecting a details row. Unlike the old pseudo-hover, moving the
-    # keyboard cursor shows no tooltip at all now (`tests/test_tree_click.py`'s
-    # own `test_moving_the_keyboard_cursor_never_shows_a_tooltip` covers
-    # that directly), so there is nothing left here to overlap the details
-    # column this test asserts on.
+    # A details-row selection forces the repaint this assertion needs. (The
+    # grid holds key focus after the open -- see `app.py`'s
+    # `_on_grid_arrow` -- so this Down moves the row selection, not the
+    # tree cursor; either repaints, and no tooltip is involved.)
     fm.step(_key_event(DOWN_KEY))
 
     assert f"{_CODICON_FILE_GLYPH} readme.txt" in fm.app.screen()
     assert f"{_CODICON_FOLDER_GLYPH} alpha/" in fm.app.screen()
+
+
+def test_details_rows_get_type_specific_codicons_once_nerd_fonts_are_on(tmp_path):
+    """The per-row marker says what kind of file each row is (`_codicon_glyph`),
+    not just "file": media for images/audio/video, the dedicated PDF, zip,
+    JSON and Markdown glyphs, code by extension, and the plain file glyph
+    only for what genuinely is one. One row of each, one screen assertion
+    per row."""
+    # A fixed, short root name -- see the first test's own doc on why.
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "app.py").write_text("print()")
+    (root / "data.json").write_text("{}")
+    (root / "doc.pdf").write_bytes(b"%PDF-1.4\n")
+    (root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "app.zip").write_bytes(b"PK\x03\x04")
+    (root / "README.md").write_text("# hi")
+    (root / "plain.txt").write_text("hello")
+    fm = FileManager(root, width=160, height=24)
+    fm.step(_key_event(ENTER_KEY))  # open the root tab; key focus lands in its grid
+    assert "app.py" in fm.app.screen()
+
+    _enable_nerd_fonts(fm)
+    fm.step(_key_event(DOWN_KEY))  # a row selection, to force the repaint
+
+    screen = fm.app.screen()
+    for glyph, name in (
+        (_CODICON_CODE_GLYPH, "app.py"),
+        (_CODICON_JSON_GLYPH, "data.json"),
+        (_CODICON_PDF_GLYPH, "doc.pdf"),
+        (_CODICON_MEDIA_GLYPH, "logo.png"),
+        (_CODICON_ZIP_GLYPH, "app.zip"),
+        (_CODICON_MD_GLYPH, "README.md"),
+        (_CODICON_FILE_GLYPH, "plain.txt"),
+    ):
+        assert f"{glyph} {name}" in screen, f"no {name!r} marker painted"
+
+
+def test_untyped_files_still_get_the_plain_file_codicon(tmp_path):
+    # No extension at all: `mimetypes` can't place "Makefile"-style names,
+    # and the honest marker for them is the plain file glyph (see
+    # `_codicon_glyph`'s own doc) -- same label honesty the Kind column has.
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "Makefile").write_text("all:")
+    fm = FileManager(root, width=120, height=20)
+    fm.step(_key_event(ENTER_KEY))
+
+    _enable_nerd_fonts(fm)
+    fm.step(_key_event(DOWN_KEY))
+
+    assert f"{_CODICON_FILE_GLYPH} Makefile" in fm.app.screen()

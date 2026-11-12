@@ -339,6 +339,58 @@ FILE_ICON = {"codicon": "file", "fallback": " ", "color": None}
 _CODICON_FOLDER_GLYPH = ""
 _CODICON_FILE_GLYPH = ""
 
+# Type-specific raw PUA codepoints for the details pane's per-file marker,
+# same provenance and same why as the two above (also straight out of
+# `quadraui::codicon_names::NAMES`): media (image/audio/video), PDF,
+# archives, JSON, Markdown, and source code -- so a row's marker says what
+# kind of thing it is, not just "file". The Kind column spells the type
+# out in words; this is the at-a-glance version.
+_CODICON_CODE_GLYPH = ""
+_CODICON_MEDIA_GLYPH = ""
+_CODICON_PDF_GLYPH = ""
+_CODICON_ZIP_GLYPH = ""
+_CODICON_JSON_GLYPH = ""
+_CODICON_MD_GLYPH = ""
+
+# Extensions `mimetypes` won't call source code but a file manager should:
+# `_codicon_glyph` matches these before falling back to the MIME rules.
+_CODE_EXTS = {
+    "asm", "bash", "c", "cc", "clj", "cpp", "cs", "css", "dart", "go",
+    "h", "hh", "hpp", "hs", "html", "java", "js", "jsx", "kt", "lua",
+    "mjs", "mm", "php", "pl", "py", "pyi", "rb", "rs", "sass", "scss",
+    "sh", "sql", "swift", "ts", "tsx", "vim", "xml", "yaml", "yml",
+    "toml",
+}
+
+
+def _codicon_glyph(node: Node) -> str:
+    """The Nerd Font marker glyph for one details-table row: `folder` for a
+    directory, else a type-specific file icon -- media for images/audio/
+    video, the dedicated PDF/JSON/Markdown glyphs, archives as a zip, and
+    source code (matched by extension, since `mimetypes` calls e.g. `.py`
+    just `text/x-python`) as a code file. Everything else stays the plain
+    `file` glyph rather than reaching for a wrong-ish fit."""
+    if node.is_dir:
+        return _CODICON_FOLDER_GLYPH
+    name = node.name.lower()
+    ext = name.rpartition(".")[2] if "." in name else ""
+    if ext == "json":
+        return _CODICON_JSON_GLYPH
+    if ext in ("md", "markdown"):
+        return _CODICON_MD_GLYPH
+    if ext in _CODE_EXTS:
+        return _CODICON_CODE_GLYPH
+    mime = mimetypes.guess_type(name)[0]
+    if mime is None:
+        return _CODICON_FILE_GLYPH
+    if mime.startswith(("image/", "audio/", "video/")):
+        return _CODICON_MEDIA_GLYPH
+    if mime == "application/pdf":
+        return _CODICON_PDF_GLYPH
+    if "zip" in mime or "tar" in mime or mime == "application/x-7z-compressed":
+        return _CODICON_ZIP_GLYPH
+    return _CODICON_FILE_GLYPH
+
 
 def _styled_text(text: str) -> dict:
     """One `StyledText` with a single uncolored span -- the shape tree `text`,
@@ -542,11 +594,15 @@ def details_table(
     tab's own table (see `_details_pane`); passing them lets the real
     backends paint the current selection and route Up/Down/Enter here.
     `nerd_fonts_enabled` (`FileManager`'s own one-time-cached read of
-    `QuiApp.nerd_fonts_enabled()`, see its own doc) picks which half of
-    the folder/file codicon marker leads the Name cell: `DataRow` has no
-    `Icon`-bearing field the way `Tree`/`Button` rows do, so there is no
-    engine-side `Icon::resolve` to lean on here, and the ASCII fallback
-    marker has to be chosen by hand instead."""
+    `QuiApp.nerd_fonts_enabled()`, see its own doc) picks whether a Nerd
+    Font marker leads the Name cell: `DataRow` has no `Icon`-bearing field
+    the way `Tree`/`Button` rows do, so there is no engine-side
+    `Icon::resolve` to lean on here, and the ASCII fallback marker has to
+    be chosen by hand instead. The marker is type-specific (`_codicon_glyph`
+    -- media/PDF/JSON/code/...), and with no Nerd Font there's nothing an
+    ASCII marker would say that doesn't duplicate the trailing "/" a
+    folder already carries, so it only appears once there's an actual
+    glyph to show."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
@@ -579,7 +635,9 @@ def details_table(
             # glyph to show -- no "/ name/" (marker's "/" vs. the trailing
             # one) or "  name" (two stacked blanks) in the ASCII fallback.
             if nerd_fonts_enabled:
-                marker = _CODICON_FOLDER_GLYPH if child.is_dir else _CODICON_FILE_GLYPH
+                # A type-specific marker (media/PDF/JSON/code/...), not just
+                # folder-or-file -- see `_codicon_glyph`.
+                marker = _codicon_glyph(child)
                 name = f"{marker} {child.name}/" if child.is_dir else f"{marker} {child.name}"
             else:
                 name = f"{child.name}/" if child.is_dir else child.name
@@ -1809,6 +1867,11 @@ class FileManager:
         i = nodes.index(self.cursor)
         new_i = max(0, min(len(nodes) - 1, i + delta))
         self.cursor = nodes[new_i]
+        # The grid lists whatever the tree cursor lands on, the same way a
+        # tree-row click does (VS Code/Finder sidebar: selecting a folder
+        # *is* asking to see inside it). Keyboard and mouse selection now
+        # show the same thing; `_open` (Enter) still opens a *new* tab.
+        self._show_folder_in_active_tab(self.cursor)
 
     def _tree_capacity(self) -> int:
         """Painted rows that fit in the body's row band: the app's measured
@@ -2056,6 +2119,7 @@ class FileManager:
             node.expanded = True
         elif node.expanded and subdirs:
             self.cursor = subdirs[0]
+            self._show_folder_in_active_tab(self.cursor)  # grid follows the cursor
 
     def _collapse(self) -> None:
         """Collapse the cursored folder; if already collapsed, jump to parent."""
@@ -2064,6 +2128,7 @@ class FileManager:
             node.expanded = False
         elif node.parent is not None:
             self.cursor = node.parent
+            self._show_folder_in_active_tab(self.cursor)  # grid follows the cursor
 
     def _reveal(self, node: Node) -> None:
         """Expand every ancestor so `node` is a visible tree row."""

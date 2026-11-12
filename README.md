@@ -104,6 +104,15 @@ parent listing (focusing that folder's tab when one is still open). Left on the
 root listing hands key focus back to the tree, so a keyboard session can always
 leave the grid the same way it got in.
 
+Moving the tree cursor *shows* the cursored folder in the details pane — the
+same sidebar behaviour clicking a tree row has (VS Code/Finder: selecting a
+folder is asking to see inside it), so the grid always lists the selected tree
+item. Opening a new tab stays a deliberate action (Enter).
+
+With a Nerd Font available, each grid row leads its name with a type-specific
+codicon marker (media, PDF, zip, JSON, Markdown, source code, folder), matching
+the Kind column.
+
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
 keeps it applied and closes the box), `F2` to inline-rename the selected file or
 cursored folder (Enter commits a real rename on disk, Esc cancels), and click a details
