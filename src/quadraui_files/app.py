@@ -437,6 +437,35 @@ def _human_size(n: int | None) -> str:
     return f"{int(size)} {_SIZE_UNITS[i]}" if i == 0 else f"{size:.1f} {_SIZE_UNITS[i]}"
 
 
+def _human_kind(node: Node) -> str:
+    """Finder-style "Kind" for the grid's fourth column: `Folder` for a
+    directory, else a short label derived from the name's MIME type --
+    `Plain Text` (text/plain), `PNG Image` (image/png), `PDF Document`
+    (application/pdf). The subtype carries the format and the main type the
+    noun (text→Text, image→Image, application→Document, ...); a short
+    subtype (png, pdf, zip, json) is upper-cased the way file managers
+    print acronyms. Anything `mimetypes` can't place -- no extension, an
+    unknown one -- is honestly just a `File`."""
+    if node.is_dir:
+        return "Folder"
+    mime = mimetypes.guess_type(node.name)[0]
+    if mime is None:
+        return "File"
+    main, _, subtype = mime.partition("/")
+    noun = {
+        "text": "Text",
+        "image": "Image",
+        "audio": "Audio",
+        "video": "Video",
+        "application": "Document",
+        "font": "Font",
+    }.get(main, main.title())
+    label = subtype.removeprefix("x-").replace("-", " ").title()
+    if len(label) <= 4:  # an acronym-sized subtype prints upper-case
+        label = label.upper()
+    return f"{label} {noun}".strip() if label else noun
+
+
 def _human_mtime(ts: float | None) -> str:
     """Human-readable last-modified timestamp; "" if unreadable or
     out of `datetime`'s representable range -- a pathological `st_mtime`
@@ -470,15 +499,22 @@ def _mtime_sort_key(node: Node) -> tuple[bool, float]:
     return (node.mtime is None, node.mtime or 0.0)
 
 
-_COLUMN_SORT_KEYS = {0: _sort_key, 1: _size_sort_key, 2: _mtime_sort_key}
+def _kind_sort_key(node: Node) -> tuple[bool, str, str]:
+    """Kind ascending (directories first, like every other column), with
+    the name as the tiebreak so rows of one kind keep their Name order."""
+    return (not node.is_dir, _human_kind(node).lower(), node.name.lower())
+
+
+_COLUMN_SORT_KEYS = {0: _sort_key, 1: _size_sort_key, 2: _mtime_sort_key, 3: _kind_sort_key}
 
 
 def _sort_children(children: list[Node], col: int, reverse: bool) -> list[Node]:
     """`children` ordered by details-table column `col` (0 Name, 1 Size, 2
-    Modified). Name sorts directories first then case-insensitive name --
-    the tree's own order, so the unsorted (`col == 0`, not `reverse`) case
-    matches a freshly loaded folder exactly. Size/Modified sort purely by
-    value, with a missing value (a directory's size) sorting first."""
+    Modified, 3 Kind). Name sorts directories first then case-insensitive
+    name -- the tree's own order, so the unsorted (`col == 0`, not
+    `reverse`) case matches a freshly loaded folder exactly. Size/Modified
+    sort purely by value, with a missing value (a directory's size) sorting
+    first; Kind sorts by its label, directories first, name as tiebreak."""
     key = _COLUMN_SORT_KEYS.get(col, _sort_key)
     ordered = sorted(children, key=key)
     return list(reversed(ordered)) if reverse else ordered
@@ -516,6 +552,7 @@ def details_table(
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
         {"title": "Size", "width": {"Flex": 1.0}, "align": "Right"},
         {"title": "Modified", "width": {"Flex": 1.5}, "align": "Left"},
+        {"title": "Kind", "width": {"Flex": 1.2}, "align": "Left"},
     ]
     if 0 <= sort_col < len(columns):
         arrow = "▼" if sort_reverse else "▲"
@@ -531,7 +568,7 @@ def details_table(
             note = "(no matches)"
         else:
             note = "(empty folder)"
-        rows = [{"cells": [_styled_text(note), _styled_text(""), _styled_text("")]}]
+        rows = [{"cells": [_styled_text(note), _styled_text(""), _styled_text(""), _styled_text("")]}]
     else:
         rows = []
         for child in shown:
@@ -548,8 +585,9 @@ def details_table(
                 name = f"{child.name}/" if child.is_dir else child.name
             size = "" if child.is_dir else _human_size(child.size_bytes)
             modified = _human_mtime(child.mtime)
+            kind = _human_kind(child)
             rows.append(
-                {"cells": [_styled_text(name), _styled_text(size), _styled_text(modified)]}
+                {"cells": [_styled_text(name), _styled_text(size), _styled_text(modified), _styled_text(kind)]}
             )
 
     return {

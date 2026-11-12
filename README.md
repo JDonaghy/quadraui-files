@@ -107,7 +107,7 @@ leave the grid the same way it got in.
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
 keeps it applied and closes the box), `F2` to inline-rename the selected file or
 cursored folder (Enter commits a real rename on disk, Esc cancels), and click a details
-column header (Name/Size/Modified) to sort by it, click again to reverse — the active
+column header (Name/Size/Modified/Kind) to sort by it, click again to reverse — the active
 header shows a `▲`/`▼` marker. A rename is rejected (with a status-bar message, not a
 crash) if the typed name contains a path separator or starts with `.`: this app's model
 never lists dotfiles, so renaming onto one would just make the entry vanish on the next
