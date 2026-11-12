@@ -99,7 +99,9 @@ def test_reimport_keeps_the_session_and_rebinds_the_class(fm):
     assert [n.name for n in fm.open] == [fm.root.name], "open tabs lost"
     assert fm.cursor is fm.root, "cursor lost"
     fm.step(_key_event(DOWN_KEY))  # the reloaded code drives the app fine
-    assert fm.cursor.name == "alpha"
+    # (opening the root handed key focus to its grid -- focus follows the
+    # open -- so Down selects that listing's first row, not the tree)
+    assert fm.selected_file.name == "alpha"
 
 
 def test_a_successful_reload_shows_a_live_counter_in_the_status_bar(fm):
@@ -123,7 +125,9 @@ def test_a_broken_edit_keeps_the_last_good_code_and_surfaces_the_error(fm, tmp_p
     assert type(fm.reload_error).__name__ == "SyntaxError"
     assert "reload failed" in fm.app.screen(), "status bar never showed the failure"
     fm.step(_key_event(DOWN_KEY))  # the last good code still drives
-    assert fm.cursor.name == "alpha"
+    # (the root tab's grid holds key focus -- focus follows the open -- so
+    # Down moves its row selection, not the tree cursor)
+    assert fm.selected_file.name == "alpha"
 
     helper.write("VALUE = 2\n")  # a later good save clears the error
     assert fm.reload_if_changed() is True

@@ -8,7 +8,7 @@ import os
 from conftest import activate_child as _activate_child
 
 from quadraui_files import FileManager
-from quadraui_files.app import DELETE_KEY, DOWN_KEY, ENTER_KEY, PREVIEW_MAX_BYTES, _key_event
+from quadraui_files.app import DELETE_KEY, DOWN_KEY, ENTER_KEY, LEFT_KEY, PREVIEW_MAX_BYTES, _key_event
 
 
 def _open_root_tab(fm: FileManager) -> None:
@@ -56,6 +56,10 @@ def test_selecting_a_different_file_replaces_the_preview(sample_tree):
     _activate_child(fm, "readme.txt")
     assert "root readme content" in fm.app.screen()
 
+    # The activation left key focus in the root grid (focus follows the
+    # open); Left on the root listing hands it back to the tree, and from
+    # there the arrows walk the tree cursor again.
+    fm.step(_key_event(LEFT_KEY))  # key focus back to the tree
     fm.step(_key_event(DOWN_KEY))  # tree cursor -> alpha
     fm.step(_key_event(ENTER_KEY))  # open alpha as a second tab, switch to it
     _activate_child(fm, "notes.txt")

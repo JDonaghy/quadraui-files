@@ -34,12 +34,17 @@ the split ratio, which folders are open as tabs, the active tab, a transient
 status hint), the event handler mutates them, and `render()` rebuilds the whole
 layout tree from them every frame. Neither callback calls back into `QuiApp`.
 
-Interaction (keyboard drives, mouse works too):
-  Up / Down    move the folder cursor
-  Right        expand the cursored folder (load on demand); if already
-               expanded, descend into its first subfolder
-  Left         collapse the cursored folder; if already collapsed, jump to
-               its parent
+Interaction (keyboard drives, mouse works too). Arrows act on the pane with
+key focus -- the tree, or a details table once a row click or an open hands
+focus to it (Left on the root listing hands focus back):
+
+  Up / Down    tree: move the folder cursor; grid: move the selected row
+  Right        tree: expand the cursored folder (load on demand); if already
+               expanded, descend into its first subfolder. grid: drill into
+               the selected folder row
+  Left         tree: collapse the cursored folder; if already collapsed, jump
+               to its parent. grid: step up to the parent listing; on the
+               root listing, hand key focus back to the tree
   Enter / o    with the tree focused: open the cursored folder as a details
                tab (and expand it); with the details table focused: open
                the selected row the same way a double-click would
@@ -2062,7 +2067,12 @@ class FileManager:
 
     def _open(self, node: Node | None = None) -> None:
         """Open `node` (default: the cursor) as a details tab, expanding it;
-        focus its tab if already open. A file just reports itself."""
+        focus its tab if already open. A file just reports itself.
+
+        Opening a folder also hands key focus to the opened tab's table --
+        "opened it, now you're in it": the next arrows navigate that listing
+        (`_on_grid_arrow`) instead of the tree cursor, and Left on the root
+        listing hands focus back, so the keyboard covers both panes."""
         node = node or self.cursor
         if not node.is_dir:
             self.message = f"{node.name} ({_human_size(node.size_bytes)})"
@@ -2072,9 +2082,11 @@ class FileManager:
         for i, existing in enumerate(self.open):
             if existing.path == node.path:
                 self.active_tab = i
+                self.table_focus = True
                 return
         self.open.append(node)
         self.active_tab = len(self.open) - 1
+        self.table_focus = True
 
     def _refresh(self) -> None:
         node = self.cursor
@@ -2201,11 +2213,13 @@ class FileManager:
         `DataTable/RowActivated` once the table has focus and a row is
         selected (see `_handle`'s `DataTable` branch) -- this only runs for
         `o` (which the table never intercepts; see `details_table`'s own
-        doc on `data_table_key_event`) and for Enter with the table focused
-        but nothing selected yet, or the tree focused. Opens the table's
-        current selection if the table has focus and it's still listed in
-        the active tab; otherwise falls back to opening the tree cursor
-        (`_open`)."""
+        doc on `data_table_key_event`) and for Enter the engine did not
+        rewrite: the tree focused, the table focused but nothing selected
+        yet, or the table holding the keyboard handoff `_open` made (no
+        `MouseDown` ever focused it, so the engine never engages). Opens the
+        table's current selection if the table has focus and it's still
+        listed in the active tab; otherwise falls back to opening the tree
+        cursor (`_open`)."""
         if self.table_focus and self.open:
             folder = self.open[self.active_tab]
             children = self._visible_children(folder)
@@ -2213,6 +2227,54 @@ class FileManager:
                 self._activate_detail(children.index(self.selected_file))
                 return
         self._open()
+
+    def _on_grid_arrow(self, name: str) -> None:
+        """An arrow key while a details table has key focus (a row click, or
+        the handoff `_open` makes when it opens a folder). Arrows act on the
+        focused pane: Up/Down move that table's row selection -- the engine
+        rewrites those into `RowSelected` itself only from a real mouse
+        `MouseDown` on the table (see `details_table`'s own doc), so a
+        keyboard handoff handles them here, through the same `_select_detail`
+        a rewritten event would reach -- Right drills into the selected
+        folder row (a file row only hints at Enter, since handing it to the
+        OS is what Enter/`o` are for), and Left steps up to the parent
+        listing, focusing its tab when it is still open (it usually is:
+        Right opened a new one to get here). Left on the root listing has
+        nowhere up to go and hands key focus back to the tree instead: the
+        keyboard way out of the grid, so a session that entered it without
+        touching the mouse can leave it the same way."""
+        if not self.open:
+            return
+        folder = self.open[self.active_tab]
+        children = self._visible_children(folder)
+        if name in ("Up", "Down"):
+            idx = -1  # nothing selected yet: either arrow lands on the first row
+            if self.selected_file is not None:
+                for i, child in enumerate(children):
+                    if child.path == self.selected_file.path:
+                        idx = i
+                        break
+            idx = min(idx + 1, len(children) - 1) if name == "Down" else max(idx - 1, 0)
+            if 0 <= idx < len(children):
+                self._select_detail(idx)
+            return
+        if name == "Right":
+            if self.selected_file is None:
+                return
+            for i, child in enumerate(children):
+                if child.path == self.selected_file.path:
+                    if child.is_dir:
+                        self._activate_detail(i)  # drill in; focus follows via _open
+                    else:
+                        self.message = f"{child.name} is a file — press Enter to open it"
+                    return
+            return  # selection is not in this listing (a filter narrowed it out)
+        parent = folder.parent
+        if parent is not None:
+            self._open(parent)  # step up; key focus stays in the grid
+        else:
+            self.table_focus = False  # at the root: back to the tree
+            self.message = "arrows are back on the tree"
 
     # --- file actions: delete/trash, open, reveal, context menu -------------
     #
@@ -3212,18 +3274,22 @@ class FileManager:
     def _on_key(self, name: str) -> None:
         self.message = ""
         if name in ("Down", "Up", "Right", "Left"):
-            # A focused table only intercepts Up/Down into its own
-            # `RowSelected` (and Enter into `RowActivated`) when it has at
-            # least one row -- see `details_table`'s own doc -- so reaching
-            # here with Up/Down on a non-empty table, or with Left/Right at
-            # all (never intercepted, exactly like `o`), does not actually
-            # prove the table lost engine focus. Clearing `table_focus`
-            # regardless keeps this app's own bookkeeping matched to "the
-            # tree cursor is what these four keys act on from here down,"
-            # which is the behaviour this branch exists to give; it can
-            # lag the engine's real focus for a beat (e.g. after Up/Down on
-            # an empty/filtered-to-nothing table) until the next click.
-            self.table_focus = False
+            # Arrows act on whichever pane has key focus (`table_focus` is
+            # this app's single source of truth for that -- see the model
+            # comment at its definition): with key focus in a details table
+            # they navigate that listing (`_on_grid_arrow`), else the tree
+            # cursor. The engine rewrites Up/Down into `RowSelected` (and
+            # Enter into `RowActivated`) only from a real mouse `MouseDown`
+            # on the table -- a keyboard handoff (`_open`) still delivers
+            # all four here -- and Left/Right are never rewritten, click or
+            # not, so the grid branch is what keeps those off the tree too.
+            # The grid also needs to still exist: closing its last tab
+            # leaves `table_focus` stale until the next click, and arrows
+            # should walk the tree again, not die.
+            if self.table_focus and self.open:
+                self._on_grid_arrow(name)
+                return
+            self.table_focus = False  # belt-and-braces: this far means tree
             if name == "Down":
                 self._move(1)
             elif name == "Up":
@@ -3235,10 +3301,12 @@ class FileManager:
         elif name == "Enter":
             # A focused table with a row selected already turned this into
             # `DataTable/RowActivated` before it ever reached here (see
-            # `_handle`); reaching here means either the tree has focus, or
-            # the table does but nothing is selected yet -- the tree cursor
-            # is the only sensible target either way.
-            self._open()
+            # `_handle`) -- but that rewriting, exactly like Up/Down's,
+            # engages only from a real mouse `MouseDown` on the table, and
+            # key focus can now reach the grid without one (`_open` hands
+            # it over), so this routes by focus the same way `o` does
+            # instead of assuming the tree cursor is the only target.
+            self._open_table_selection_or_cursor()
         elif name == "o":
             # The table never intercepts `o` (unlike Enter) regardless of
             # which one has real focus, so this is the one key that still

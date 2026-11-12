@@ -94,6 +94,16 @@ A right-click would be the natural way to raise the context menu, but the pinned
 quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
 them, so `Menu` is the keyboard stand-in.
 
+Arrow keys act on whichever pane has key focus. Opening a folder (Enter, `o`,
+the context menu's Open) hands key focus to the opened tab's details table —
+"opened it, now you're in it" — and a row click or header click focuses it too.
+With the tree focused, Up/Down walk the folder cursor and Right/Left
+expand/collapse it; with a details table focused, Up/Down move its row
+selection, Right drills into the selected folder row, and Left steps up to the
+parent listing (focusing that folder's tab when one is still open). Left on the
+root listing hands key focus back to the tree, so a keyboard session can always
+leave the grid the same way it got in.
+
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
 keeps it applied and closes the box), `F2` to inline-rename the selected file or
 cursored folder (Enter commits a real rename on disk, Esc cancels), and click a details
