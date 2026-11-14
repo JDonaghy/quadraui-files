@@ -48,17 +48,18 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = [a for a in argv if not a.startswith("--")]
     flags = {a for a in argv if a.startswith("--")}
-    root = Path(args[0]) if args else Path.cwd()
+    # No PATH: open on the home folder, as Finder/Explorer do.
+    root = Path(args[0]).resolve() if args else None
 
     if "--dump" in flags:
-        _dump_steps(root.resolve())
+        _dump_steps(root)
         return 0
 
     if "--native" in flags and "--tui" not in flags and not hasattr(QuiApp, "run_native"):
         sys.stderr.write(_native_unavailable_message())
         return 2
 
-    fm = FileManager(root.resolve())
+    fm = FileManager(root)
 
     if "--reload" in flags:
         # Watch the app's own module and re-import it on save, keeping the

@@ -31,6 +31,7 @@ from quadraui_files.app import TRAY_MENU_OPEN_HOME_ID, TRAY_MENU_QUIT_ID, _key_e
 F2_KEY = {"Named": {"F": 2}}
 ESCAPE_KEY = {"Named": "Escape"}
 DOWN_KEY = {"Named": "Down"}
+ENTER_KEY = {"Named": "Enter"}
 
 
 class _ActionSpy:
@@ -108,7 +109,8 @@ def test_window_title_tracks_navigation_into_a_folder(sample_tree):
     spy = _ActionSpy(fm.actions)
     fm.actions = spy
 
-    fm.step(_key_event(DOWN_KEY))  # cursor onto "alpha", the first subfolder
+    fm.step(_key_event(DOWN_KEY))  # select "alpha", the first subfolder
+    fm.step(_key_event(ENTER_KEY))  # open it in place
 
     assert fm.cursor.name == "alpha"
     assert "alpha" in fm.window_title
@@ -126,6 +128,7 @@ def test_a_headless_run_never_writes_a_title_escape_to_stdout(sample_tree, capfd
     fm.actions = spy
 
     fm.step(_key_event(DOWN_KEY))
+    fm.step(_key_event(ENTER_KEY))  # into "alpha"
 
     assert "alpha" in fm.window_title
     assert spy.titles == []

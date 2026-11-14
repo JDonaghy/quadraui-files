@@ -20,6 +20,7 @@ import time
 from quadraui import QuiApp
 
 from conftest import find_row as _find_row
+from conftest import sample_sections
 from quadraui_files import app as _app_module
 from quadraui_files import cli as _cli_module
 from quadraui_files import FileManager
@@ -92,17 +93,17 @@ def test_hovering_a_toolbar_button_shows_its_tooltip_after_the_delay(sample_tree
     fm = FileManager(sample_tree, width=160, height=30)
     _shorten_tooltip_delay(fm)
 
-    x, y = _find_row(fm, "Expand")
+    x, y = _find_row(fm, "Preview (p)")
     _move_to(fm, x, y)
-    assert "Expand the cursored folder" not in fm.app.screen(), (
+    assert "Toggle the preview pane" not in fm.app.screen(), (
         "landing on the button must not show the tooltip before the delay elapses"
     )
 
     _wait_past_the_delay_and_tick(fm)
-    assert "Expand the cursored folder" in fm.app.screen()
+    assert "Toggle the preview pane" in fm.app.screen()
 
     _move_to(fm, _OFF_X, _OFF_Y)
-    assert "Expand the cursored folder" not in fm.app.screen(), (
+    assert "Toggle the preview pane" not in fm.app.screen(), (
         "leaving the button must hide the tooltip immediately, no delay"
     )
 
@@ -156,21 +157,27 @@ def test_moving_from_one_tree_row_to_another_replaces_the_tooltip_text(sample_tr
     assert alpha_path not in fm.app.screen()
 
 
-def test_hovering_a_tree_rows_chevron_shows_the_same_rows_tooltip(sample_tree):
-    """`_hover_target_for` folds `tree_chevron` into the same `"tree"`
-    target as `tree_row` -- hovering the row's own expand/collapse
-    triangle must show that row's tooltip too, not be treated as a hit
-    this app has no tooltip for."""
-    fm = FileManager(sample_tree, width=160, height=30)
+def test_hovering_a_sidebar_place_shows_its_full_path_tooltip(sample_tree):
+    """A sidebar place row's tooltip is the folder it stands for -- "Alpha"
+    is a label, the tooltip says where it really is. Wide, so pytest's long
+    temp path fits in the tooltip box."""
+    fm = FileManager(sample_tree, width=220, height=30, sections=sample_sections(sample_tree))
     _shorten_tooltip_delay(fm)
 
-    _, y = _find_row(fm, "alpha")
-    line = fm.app.screen().splitlines()[int(y)]
-    chevron_x = next(i for i, ch in enumerate(line) if ch in "▾▸")
-
-    _move_to(fm, float(chevron_x), y)
+    x, y = _find_row(fm, "Alpha")
+    _move_to(fm, x, y)
     _wait_past_the_delay_and_tick(fm)
-    assert str(sample_tree / "alpha") in fm.app.screen()
+    assert str(fm.sections[0].places[1].path) in fm.app.screen()
+
+
+def test_hovering_a_sidebar_section_header_shows_no_tooltip(sidebar_fm):
+    fm = sidebar_fm
+    _shorten_tooltip_delay(fm)
+
+    x, y = _find_row(fm, "Favorites")
+    _move_to(fm, x, y)
+    _wait_past_the_delay_and_tick(fm)
+    assert fm._tooltip_visible is False
 
 
 def test_continued_movement_within_a_tree_row_re_arms_the_auto_dismiss_window(sample_tree, monkeypatch):
@@ -290,6 +297,12 @@ def test_cli_native_branch_leaves_tooltips_enabled_and_a_hover_still_fires(sampl
 
     def _fake_run_native(self, title=None):
         fm = captured["fm"]
+        # No real window exists: this stub steps the headless backend, which
+        # can't take the native-only chrome calls `cli.main` opted into on a
+        # native build (`set_represented_filename`/`set_tray_icon` raise
+        # Unsupported there).
+        fm.native_window_chrome = False
+        fm.native_tray = False
         x, y = _find_row(fm, "alpha")
         _move_to(fm, x, y)
         _wait_past_the_delay_and_tick(fm)

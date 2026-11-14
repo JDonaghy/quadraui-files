@@ -51,12 +51,13 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 
 | Tranche | Scope | State |
 |---|---|---|
-| **T0** | Folder tree + file-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
+| **T0** | File-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
+| **Sidebar** | Finder/Explorer/Nautilus places sidebar; Explorer-style tabs with history, address bar, open-in-place | ✅ macOS TUI; native + Windows/Linux verification pending (#42, #43) |
 | **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ all backends ([known limits](#known-limits)) |
 | **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
 | **Preview** | Read-only preview pane for the selected file | ✅ all backends |
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
-| **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the toolbar, tree and details rows | ✅ all backends; native manual verification pending |
+| **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the toolbar, sidebar and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
 
 Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
@@ -94,28 +95,22 @@ A right-click would be the natural way to raise the context menu, but the pinned
 quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
 them, so `Menu` is the keyboard stand-in.
 
-Arrow keys act on whichever pane has key focus. Opening a folder (Enter, `o`,
-the context menu's Open) hands key focus to the opened tab's details table —
-"opened it, now you're in it" — and a row click or header click focuses it too.
-With the tree focused, Up/Down walk the folder cursor and Right/Left
-expand/collapse it; with a details table focused, Up/Down move its row
-selection, Right drills into the selected folder row, and Left steps up to the
-parent listing (focusing that folder's tab when one is still open). Left on the
-root listing hands key focus back to the tree, so a keyboard session can always
-leave the grid the same way it got in.
-
-Moving the tree cursor *shows* the cursored folder in the details pane — the
-same sidebar behaviour clicking a tree row has (VS Code/Finder: selecting a
-folder is asking to see inside it), so the grid always lists the selected tree
-item. Opening a new tab stays a deliberate action (Enter).
+The left pane is the host OS's own sidebar (Finder's Favorites/iCloud/Locations on
+macOS, Explorer's Quick access/This PC on Windows, Nautilus's places on Linux), even in
+the TUI. Picking a place shows it in the current tab. The tabs browse like Explorer's:
+opening a folder navigates in place, each tab keeps its own Back/Forward history
+(Backspace/`[` and `]`, or the toolbar), the address bar's breadcrumbs jump to any
+ancestor, `t` opens a new tab and `w` closes one. Arrow keys act on whichever pane has
+key focus (the list by default; Tab switches). In the list, Right opens the selected
+folder and Left goes up, selecting the folder you came from. With no PATH the app opens
+on the home folder. See [`docs/VISION.md`](docs/VISION.md) for the intended UX.
 
 With a Nerd Font available, each grid row leads its name with a type-specific
 codicon marker (media, PDF, zip, JSON, Markdown, source code, folder), matching
 the Kind column.
 
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
-keeps it applied and closes the box), `F2` to inline-rename the selected file or
-cursored folder (Enter commits a real rename on disk, Esc cancels), and click a details
+keeps it applied and closes the box), `F2` to inline-rename the selected row (Enter commits a real rename on disk, Esc cancels), and click a details
 column header (Name/Size/Modified/Kind) to sort by it, click again to reverse — the active
 header shows a `▲`/`▼` marker. A rename is rejected (with a status-bar message, not a
 crash) if the typed name contains a path separator or starts with `.`: this app's model

@@ -205,8 +205,10 @@ def test_f2_rename_to_a_hidden_name_is_rejected(sample_tree):
 
 def test_f2_renaming_a_folder_updates_children_paths_too(sample_tree):
     fm = FileManager(sample_tree)
-    fm.cursor = next(c for c in fm._visible()[1] if c.name == "alpha")
-    ensure_loaded(fm.cursor)  # load "notes.txt" so its cached path is checkable below
+    alpha = next(c for c in fm.cursor.children if c.name == "alpha")
+    ensure_loaded(alpha)  # load "notes.txt" so its cached path is checkable below
+    fm.step({"DataTable": ["fm:grid:0", {"RowSelected": {"idx": 0}}]})  # select alpha
+    assert fm.selected_file is alpha
 
     fm.step(_key_event(F2_KEY))
     assert fm.edit_mode == "rename"
@@ -218,11 +220,11 @@ def test_f2_renaming_a_folder_updates_children_paths_too(sample_tree):
 
     assert not (sample_tree / "alpha").exists()
     assert (sample_tree / "gamma" / "notes.txt").exists()
-    assert fm.cursor.name == "gamma"
-    assert fm.cursor.path == sample_tree / "gamma"
+    assert alpha.name == "gamma"
+    assert alpha.path == sample_tree / "gamma"
     # The child's cached path was fixed up too, not left pointing at the
     # now-missing "alpha" directory.
-    gamma = fm.cursor
+    gamma = alpha
     assert gamma.children is not None
     child = gamma.children[0]
     assert child.path == sample_tree / "gamma" / "notes.txt"

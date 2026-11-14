@@ -2,7 +2,7 @@
 add their own black-box tests alongside these."""
 
 from quadraui_files import FileManager
-from quadraui_files.app import DOWN_KEY, ENTER_KEY, RIGHT_KEY, _key_event
+from quadraui_files.app import DOWN_KEY, ENTER_KEY, _key_event
 
 
 def test_app_opens_and_lists_subfolders(sample_tree):
@@ -15,8 +15,8 @@ def test_app_opens_and_lists_subfolders(sample_tree):
 
 def test_opening_a_folder_shows_its_files(sample_tree):
     fm = FileManager(sample_tree)
-    # cursor onto the first subfolder, expand it (load on demand), open as a tab
-    for event in (_key_event(DOWN_KEY), _key_event(RIGHT_KEY), _key_event(ENTER_KEY)):
+    # select the first subfolder, open it (navigates the tab in place)
+    for event in (_key_event(DOWN_KEY), _key_event(ENTER_KEY)):
         fm.app.push_event(event)
         fm.app.step()
     screen = fm.app.screen()

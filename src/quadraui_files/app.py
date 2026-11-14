@@ -8,11 +8,16 @@ Layout (the `render` callback returns a *layout tree*):
     ├─ first  : sidebar_panel
     │            ├─ toolbar : real clickable actions (reserved top slot)
     │            └─ content : split (resizable divider, draggable)
-    │                          ├─ first  : a FOLDERS-ONLY tree (navigation)
+    │                          ├─ first  : the PLACES sidebar -- Finder's
+    │                          │           Favorites/Locations on macOS,
+    │                          │           Explorer's Quick access/This PC
+    │                          │           on Windows, Nautilus's places on
+    │                          │           Linux -- collapsible sections
     │                          └─ second : split (resizable divider, draggable)
-    │                                      ├─ first  : the details area --
-    │                                      │           tabs, one per opened
-    │                                      │           folder, each tab a
+    │                                      ├─ first  : tabs, one per browsing
+    │                                      │           location; each tab is an
+    │                                      │           address bar (clickable
+    │                                      │           breadcrumbs) over a
     │                                      │           data_table of that
     │                                      │           folder's contents
     │                                      └─ second : a split (header over
@@ -23,59 +28,60 @@ Layout (the `render` callback returns a *layout tree*):
     │                                                  over a read-only
     │                                                  preview of it; `p`
     │                                                  hides the whole thing
-    └─ second : a live status bar (cursored folder, item count, open tabs)
+    └─ second : a live status bar (current folder, item count, open tabs)
 
-The tree loads lazily: only one directory level is read at a time, so you can
-browse an arbitrarily deep filesystem without scanning it up front. Folders
-expand and collapse; a folder's children are read the first time it is opened.
+The sidebar is navigation only, like Finder's: picking a place shows it in
+the active tab. The tabs browse like Explorer's: each one keeps its own
+Back/Forward history, opening a folder navigates *in place*, and the address
+bar's breadcrumbs jump to any ancestor. With no PATH argument the app opens on
+the home folder; with one (`.` included) it opens there, and the sidebar
+highlights the matching place when there is one.
 
-The UI is *live*: plain Python attributes hold what changes (the cursor node,
-the split ratio, which folders are open as tabs, the active tab, a transient
-status hint), the event handler mutates them, and `render()` rebuilds the whole
-layout tree from them every frame. Neither callback calls back into `QuiApp`.
+Folders load lazily: a directory is read the first time it is shown, so
+browsing an arbitrarily deep filesystem never scans it up front.
+
+The UI is *live*: plain Python attributes hold what changes (the open tabs and
+their histories, the split ratios, the selection, a transient status hint),
+the event handler mutates them, and `render()` rebuilds the whole layout tree
+from them every frame. Neither callback calls back into `QuiApp`.
 
 Interaction (keyboard drives, mouse works too). Arrows act on the pane with
-key focus -- the tree, or a details table once a row click or an open hands
-focus to it (Left on the root listing hands focus back):
+key focus -- the file list (the default), or the sidebar:
 
-  Up / Down    tree: move the folder cursor; grid: move the selected row
-  Right        tree: expand the cursored folder (load on demand); if already
-               expanded, descend into its first subfolder. grid: drill into
-               the selected folder row
-  Left         tree: collapse the cursored folder; if already collapsed, jump
-               to its parent. grid: step up to the parent listing; on the
-               root listing, hand key focus back to the tree
-  Enter / o    with the tree focused: open the cursored folder as a details
-               tab (and expand it); with the details table focused: open
-               the selected row the same way a double-click would
-  r            reload the cursored folder from disk
-  Delete       trash the selected file (or the cursored folder) -- after a
-               Cancel/Delete confirm dialog -- and show a toast whose Undo
-               button puts the trashed path back
+  Up / Down    list: move the selected row; sidebar: move to the previous/
+               next place and show it
+  Right        list: open the selected folder in place; sidebar: hand key
+               focus to the list
+  Left         list: go up to the parent folder (selecting the folder you
+               came from); at a filesystem root, hand key focus to the sidebar
+  Tab          switch key focus between the sidebar and the list
+  Enter / o    list: open the selected row -- a folder in place, a file with
+               the OS's default app; sidebar: toggle a section, or hand key
+               focus to the list
+  Backspace, [ back in the active tab's history
+  ]            forward in the active tab's history
+  t            new tab: the selected folder, else a copy of the current one
+  w            close the active tab (the last one stays)
+  r            reload the current folder from disk
+  Delete       trash the selected row -- after a Cancel/Delete confirm
+               dialog -- and show a toast whose Undo button puts it back
   Menu         open a context menu (Open / Reveal in file manager / Move to
-               Trash) for the selected file or the cursored folder
+               Trash) for the selected row
   /            open the bottom filter box; typing narrows every open
                details table live, Enter closes the box (filter stays
                applied), Esc closes it and clears the filter
-  F2           open an inline rename box seeded with the selected file's
-               (or cursored folder's) name; Enter commits a real rename on
-               disk, Esc cancels
+  F2           open an inline rename box seeded with the selected row's
+               name; Enter commits a real rename on disk, Esc cancels
   p            toggle the preview pane (its header and content both) on
                or off; hiding gives its width back to the details table,
                and the divider ratio is remembered for next time it shows
-  click a tree row         select it and show it in the details pane,
-                            replacing the active tab's folder (expansion is
-                            untouched -- only the chevron, or Left/Right,
-                            expands/collapses)
-  click a tree chevron     expand or collapse that row, leaving the
-                            cursor/details pane untouched
+  click a sidebar place    show it in the active tab
+  click a section header   collapse/expand that section
   click a details row      select it: load/show it in the preview pane,
-                            without opening anything (mirrors clicking a row
-                            in Finder's/Explorer's details pane)
-  double-click a details   open: drill into that subfolder, or open a file
-    row                    with the OS's default app for it -- same as
-                            Enter/`o` once the table has focus, or the
-                            context menu's Open
+                            without opening anything
+  double-click a details   open: navigate into that folder in place, or
+    row                    open a file with the OS's default app
+  click a breadcrumb       jump to that ancestor folder
   click a details header   sort every open details table by that column
                             (marked with ▲/▼ on the active header); click
                             the same header again to reverse it
@@ -276,23 +282,25 @@ def _reparent_paths(node: Node) -> None:
 
 
 def build_root(root_path: Path) -> Node:
-    """The model root: loaded one level deep and expanded, so the tree opens on
-    the root's immediate subfolders."""
+    """A filesystem root (`/`, `C:\\`), loaded one level deep. Every other
+    node hangs off one of these -- see `FileManager._node_for`."""
     root = Node(name=root_path.name or str(root_path), path=root_path, is_dir=root_path.is_dir())
     ensure_loaded(root)
     root.expanded = True
     return root
 
 
-# --- model -> folders-only tree descriptor ----------------------------------
+# --- places -> sidebar tree descriptor ---------------------------------------
 #
-# The tree pane shows *only directories* -- files live in the details tabs. We
-# walk the model depth-first in display order over *expanded* folders only,
-# emitting a row per directory and tagging it with its `path`: the route from
-# the root as a list of child indices among *folders* (a `TreePath`, read on
-# the Rust side as `Vec<u16>`). A folder's path stays a valid prefix of its
-# subfolders' paths, so a click on a row resolves back to its node. `indent` is
-# folder depth.
+# The sidebar is a two-level `tree`: one row per *section* ("Favorites",
+# "Locations", ...) at indent 0, collapsible by its chevron the way Finder's
+# section headers are, and one leaf row per *place* under it. A row's `path`
+# is `[section]` or `[section, place]` -- indices into the `PlaceSection`
+# list, which is fixed for the session, so a click resolves straight back to
+# what was clicked. Only places are ever the selection; `selected_path` is
+# `None` while the active tab shows a folder that isn't one of them. A tree
+# because quadraui has no source-list primitive yet (JDonaghy/quadraui#2451):
+# section rows here are selectable like any other row.
 
 TREE_STYLE = {
     "indent": 2,  # columns of indent per depth level
@@ -398,45 +406,203 @@ def _styled_text(text: str) -> dict:
     return {"spans": [{"text": text, "fg": None, "bg": None}]}
 
 
-def folder_rows(root: Node) -> tuple[list[dict], list[Node]]:
-    """Walk the expanded model into index-aligned `(rows, nodes)`, directories
-    only. Recomputed each frame, since expanding/collapsing changes which rows
-    are visible."""
-    rows: list[dict] = []
-    nodes: list[Node] = []
+@dataclass(frozen=True)
+class Place:
+    """One sidebar entry: a folder the platform's own file manager pins
+    there (Desktop, Downloads, a mounted volume, ...). `codicon` must be in
+    quadraui's curated subset (`codicon_names::NAMES` -- ~50 names, no
+    home/cloud/drive/download glyphs yet -- JDonaghy/quadraui#2449), so
+    some icons are stand-ins. An unknown name only raises on the second
+    rendered frame (JDonaghy/quadraui#2450)."""
 
-    def walk(node: Node, path: list[int], indent: int) -> None:
+    label: str
+    path: Path
+    codicon: str
+    fallback: str = "/"
+
+
+@dataclass(frozen=True)
+class PlaceSection:
+    """A titled, collapsible group of `Place`s."""
+
+    title: str
+    places: tuple[Place, ...]
+
+
+def _existing(places: list[Place]) -> tuple[Place, ...]:
+    """`places` minus any whose folder doesn't exist on this machine (no
+    iCloud, no `~/Music`, an unmounted drive...)."""
+    return tuple(p for p in places if p.path.is_dir())
+
+
+def _mac_volumes() -> list[Place]:
+    """Finder's Locations: every volume under `/Volumes`. The boot volume
+    shows up there as a symlink back to `/` -- it keeps its own name
+    ("Macintosh HD") but browses `/` itself, as Finder's does."""
+    volumes: list[Place] = []
+    try:
+        entries = sorted(Path("/Volumes").iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        entries = []
+    boot: list[Place] = []
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            is_boot = entry.resolve() == Path("/")
+        except OSError:
+            continue
+        if is_boot:
+            boot.append(Place(entry.name, Path("/"), "root-folder"))
+        else:
+            volumes.append(Place(entry.name, entry, "database"))
+    if not boot:
+        boot.append(Place("Macintosh HD", Path("/"), "root-folder"))
+    return boot + volumes
+
+
+def _mac_sections(home: Path) -> list[PlaceSection]:
+    """Finder's default sidebar (AirDrop/Recents/Tags left out: they are
+    searches and services, not folders)."""
+    sections = [
+        PlaceSection(
+            "Favorites",
+            _existing([
+                Place("Applications", Path("/Applications"), "package"),
+                Place("Desktop", home / "Desktop", "layout"),
+                Place("Documents", home / "Documents", "files"),
+                Place("Downloads", home / "Downloads", "folder"),
+                Place(home.name, home, "account"),
+            ]),
+        ),
+        PlaceSection(
+            "iCloud",
+            _existing([
+                Place("iCloud Drive", home / "Library" / "Mobile Documents" / "com~apple~CloudDocs", "sync"),
+            ]),
+        ),
+        PlaceSection("Locations", _existing(_mac_volumes())),
+    ]
+    return [s for s in sections if s.places]
+
+
+def _windows_sections(home: Path) -> list[PlaceSection]:
+    """Explorer's navigation pane: Quick access's default pins, then This
+    PC's drives."""
+    drives: list[Place] = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = Path(f"{letter}:\\")
+        if root.exists():
+            drives.append(Place(f"Local Disk ({letter}:)" if letter == "C" else f"{letter}:", root, "database"))
+    sections = [
+        PlaceSection(
+            "Quick access",
+            _existing([
+                Place("Home", home, "account"),
+                Place("Desktop", home / "Desktop", "layout"),
+                Place("Downloads", home / "Downloads", "folder"),
+                Place("Documents", home / "Documents", "files"),
+                Place("Pictures", home / "Pictures", "file-media"),
+                Place("Music", home / "Music", "file-media"),
+                Place("Videos", home / "Videos", "file-media"),
+            ]),
+        ),
+        PlaceSection("This PC", tuple(drives)),
+    ]
+    return [s for s in sections if s.places]
+
+
+def _linux_sections(home: Path) -> list[PlaceSection]:
+    """Nautilus's sidebar: the XDG user folders, then the computer itself
+    and whatever removable media is mounted for this user."""
+    user = home.name
+    mounts: list[Place] = [Place("Computer", Path("/"), "root-folder")]
+    for base in (Path("/media") / user, Path("/run/media") / user):
+        try:
+            entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        mounts.extend(Place(e.name, e, "database") for e in entries if e.is_dir())
+    sections = [
+        PlaceSection(
+            "Places",
+            _existing([
+                Place("Home", home, "account"),
+                Place("Desktop", home / "Desktop", "layout"),
+                Place("Documents", home / "Documents", "files"),
+                Place("Downloads", home / "Downloads", "folder"),
+                Place("Music", home / "Music", "file-media"),
+                Place("Pictures", home / "Pictures", "file-media"),
+                Place("Videos", home / "Videos", "file-media"),
+            ]),
+        ),
+        PlaceSection("Devices", _existing(mounts)),
+    ]
+    return [s for s in sections if s.places]
+
+
+def default_sections(platform: str | None = None, home: Path | None = None) -> list[PlaceSection]:
+    """The sidebar the host OS's own file manager would show -- Finder's on
+    macOS, Explorer's on Windows, Nautilus's elsewhere. Decided by the host
+    OS, not the backend: the TUI on a Mac shows Finder's places too."""
+    platform = platform or sys.platform
+    home = home or Path.home()
+    if platform == "darwin":
+        return _mac_sections(home)
+    if platform == "win32":
+        return _windows_sections(home)
+    return _linux_sections(home)
+
+
+def sidebar_rows(
+    sections: list[PlaceSection], collapsed: set[str]
+) -> tuple[list[dict], list[PlaceSection | Place]]:
+    """Index-aligned `(rows, entries)` for the sidebar tree: each section's
+    header row, then -- unless its title is in `collapsed` -- one row per
+    place. Rebuilt each frame (a collapse changes which rows exist)."""
+    rows: list[dict] = []
+    entries: list[PlaceSection | Place] = []
+    for s, section in enumerate(sections):
+        expanded = section.title not in collapsed
         rows.append(
             {
-                "path": path,
-                "indent": indent,
-                "icon": FOLDER_OPEN_ICON if node.expanded else FOLDER_ICON,
-                "text": _styled_text(node.name),
+                "path": [s],
+                "indent": 0,
+                "icon": None,
+                "text": _styled_text(section.title),
                 "badge": None,
-                "is_expanded": node.expanded,
+                "is_expanded": expanded,
             }
         )
-        nodes.append(node)
-        if node.expanded:
-            for i, child in enumerate(node.subdirs()):
-                walk(child, path + [i], indent + 1)
+        entries.append(section)
+        if not expanded:
+            continue
+        for p, place in enumerate(section.places):
+            rows.append(
+                {
+                    "path": [s, p],
+                    "indent": 1,
+                    "icon": {"codicon": place.codicon, "fallback": place.fallback, "color": None},
+                    "text": _styled_text(place.label),
+                    "badge": None,
+                    "is_expanded": None,
+                }
+            )
+            entries.append(place)
+    return rows, entries
 
-    walk(root, path=[], indent=0)
-    return rows, nodes
 
-
-def tree_leaf(
-    rows: list[dict], *, selected_path: list[int], scroll_offset: int, has_focus: bool = True
+def sidebar_leaf(
+    rows: list[dict], *, selected_path: list[int] | None, scroll_offset: int, has_focus: bool = False
 ) -> dict:
-    """A layout-tree *leaf* wrapping the folders-only tree descriptor. A leaf is
+    """A layout-tree *leaf* wrapping the sidebar's tree descriptor. A leaf is
     `{"id", "<kind>": <descriptor>}`; the id is unique across the whole tree.
-    `has_focus` keeps arrow keys / Enter routed here on the real backends --
+    `has_focus` keeps arrow keys routed here on the real backends --
     `self.table_focus` is this app's single source of truth for which of the
-    tree/details-table has it, so a caller passes `not self.table_focus`.
-    `scroll_offset` is the index of the first painted row -- the tree is purely
-    declarative (it renders `rows[scroll_offset..]`), so the app owns it and
-    advances it to keep the cursor in view; the backend derives the scrollbar
-    thumb from it."""
+    sidebar/details table has it, so a caller passes `not self.table_focus`.
+    `scroll_offset` is the index of the first painted row -- the tree is
+    purely declarative (it renders `rows[scroll_offset..]`), so the app owns
+    it; the backend derives the scrollbar thumb from it."""
     return {
         "id": "fm:tree",
         "tree": {
@@ -618,13 +784,16 @@ def details_table(
     shown = all_children if children is None else children
     if not shown:
         if folder.load_error:
+            # `FileManager._details_pane` shows `unreadable_leaf` instead;
+            # this only covers a direct caller (the `--dump` path).
             reason = folder.load_error_reason
-            note = f"(can't read: {reason})" if reason else "(unreadable)"
+            notes = [f"(can't read: {reason})" if reason else "(unreadable)"]
         elif all_children:
-            note = "(no matches)"
+            notes = ["(no matches)"]
         else:
-            note = "(empty folder)"
-        rows = [{"cells": [_styled_text(note), _styled_text(""), _styled_text(""), _styled_text("")]}]
+            notes = ["(empty folder)"]
+        blank = _styled_text("")
+        rows = [{"cells": [_styled_text(n), blank, blank, blank], "decoration": "Muted"} for n in notes]
     else:
         rows = []
         for child in shown:
@@ -654,6 +823,32 @@ def details_table(
         "rows": rows,
         "selected_idx": selected_idx,
         "has_focus": has_focus,
+    }
+
+
+def unreadable_leaf(folder: Node, widget_id: str) -> dict:
+    """What the listing shows for a folder that couldn't be read: the OS's
+    reason, and on macOS's "Operation not permitted" -- its privacy
+    protection (TCC) -- where to grant access. The grant belongs to the
+    *terminal app* running this program, which is why it's spelled out."""
+    reason = folder.load_error_reason or "unknown error"
+    lines = [f"Can't read {folder.path}", f"  {reason}"]
+    if sys.platform == "darwin" and reason == "Operation not permitted":
+        lines += [
+            "",
+            "macOS is blocking access to this folder. Allow the app",
+            "running quadraui-files (your terminal, for --tui) under",
+            "System Settings › Privacy & Security › Files and Folders",
+            "(or Full Disk Access), then restart that app.",
+        ]
+    return {
+        "id": widget_id,
+        "text_display": {
+            "id": widget_id,
+            "lines": [_styled_text(line) for line in lines],
+            "scroll_offset": 0,
+            "auto_scroll": False,
+        },
     }
 
 
@@ -800,6 +995,12 @@ def preview_leaf(node: Node | None, *, capacity: int) -> dict:
 # relies on for its own `TabClosed`. No bespoke hit-testing or widget needed.
 
 PREVIEW_HEADER_CLOSE_ACTION = "fm:preview:close"
+
+# Address-bar breadcrumb clicks: `f"{CRUMB_ACTION_PREFIX}{depth}"`, depth 0
+# being the filesystem root -- see `FileManager._address_leaf`.
+CRUMB_ACTION_PREFIX = "fm:crumb:"
+
+TAB_BAR_ID = "fm:tabs"
 _PREVIEW_NAME_MAX_CHARS = 40  # upper bound; the header leaf tightens this per the column's own width
 _PREVIEW_HEADER_RESERVED_CELLS = 2 + 3  # MIN_GAP_CELLS + " × " -- see the header leaf's own doc
 
@@ -945,8 +1146,6 @@ TOOLBAR_ID = "fm:toolbar"
 # hand from `quadraui::codicon_names::NAMES`; `folder`/`file` reuse the
 # constants already picked for the details pane instead of duplicating them.
 _TOOLBAR_CODICON_GLYPHS = {
-    "chevron-right": "",
-    "chevron-down": "",
     "folder-opened": "",
     "layout": "",
     "sync": "",
@@ -1018,8 +1217,9 @@ def _toolbar_action(
     }
 
 
-TOOLBAR_EXPAND_ID = "fm:tb:expand"
-TOOLBAR_COLLAPSE_ID = "fm:tb:collapse"
+TOOLBAR_BACK_ID = "fm:tb:back"
+TOOLBAR_FORWARD_ID = "fm:tb:forward"
+TOOLBAR_UP_ID = "fm:tb:up"
 TOOLBAR_OPEN_ID = "fm:tb:open"
 TOOLBAR_PREVIEW_ID = "fm:tb:preview"
 TOOLBAR_REFRESH_ID = "fm:tb:refresh"
@@ -1039,26 +1239,33 @@ def _toolbar(nerd_fonts_enabled: bool) -> dict:
         "id": TOOLBAR_ID,
         "buttons": [
             _toolbar_action(
-                TOOLBAR_EXPAND_ID,
-                label="Expand",
-                tooltip="Expand the cursored folder",
-                key_hint="→",
-                codicon="chevron-right",
+                TOOLBAR_BACK_ID,
+                # No arrow glyphs in quadraui's curated codicon subset yet
+                # (nor `chevron-left`), so Back/Forward/Up stay labelled --
+                # JDonaghy/quadraui#2449.
+                label="Back",
+                tooltip="Back to the previous folder in this tab",
+                key_hint="⌫",
+                codicon=None,
+                fallback="<",
+                nerd_fonts_enabled=nerd_fonts_enabled,
+            ),
+            _toolbar_action(
+                TOOLBAR_FORWARD_ID,
+                label="Forward",
+                tooltip="Forward to the next folder in this tab",
+                key_hint="]",
+                codicon=None,
                 fallback=">",
                 nerd_fonts_enabled=nerd_fonts_enabled,
             ),
             _toolbar_action(
-                TOOLBAR_COLLAPSE_ID,
-                label="Collapse",
-                tooltip="Collapse the cursored folder",
+                TOOLBAR_UP_ID,
+                label="Up",
+                tooltip="Up to the parent folder",
                 key_hint="←",
-                # `chevron-left` would read more naturally next to Expand's
-                # `chevron-right` (VS Code reserves the up/down pair for a
-                # row's own expanded/collapsed *state*, not for an action),
-                # but it isn't in this pinned SHA's curated codicon subset --
-                # `chevron-down` is the only other chevron on offer.
-                codicon="chevron-down",
-                fallback="<",
+                codicon=None,
+                fallback="^",
                 nerd_fonts_enabled=nerd_fonts_enabled,
             ),
             _toolbar_action(
@@ -1083,7 +1290,7 @@ def _toolbar(nerd_fonts_enabled: bool) -> dict:
             _toolbar_action(
                 TOOLBAR_REFRESH_ID,
                 label="Refresh",
-                tooltip="Reload the cursored folder",
+                tooltip="Reload the current folder",
                 key_hint="r",
                 codicon="sync",
                 fallback="R",
@@ -1553,22 +1760,38 @@ class FileManager:
     drive it headlessly with `step`, the push-and-dispatch pair the run loops
     perform per event."""
 
-    def __init__(self, root_path: Path, width: int = 100, height: int = 30):
-        self.root = build_root(root_path)
+    def __init__(
+        self,
+        root_path: Path | None = None,
+        width: int = 100,
+        height: int = 30,
+        *,
+        sections: list[PlaceSection] | None = None,
+    ):
+        """Open on `root_path` (default: the home folder, as Finder and
+        Explorer do). `sections` overrides the host OS's own sidebar places
+        (`default_sections`) -- tests pass a fixed set."""
+        self.sections = default_sections() if sections is None else sections
+        self.collapsed_sections: set[str] = set()  # sidebar section titles folded shut
+        self._roots: dict[str, Node] = {}  # filesystem anchor -> its model root (see `_node_for`)
+        self.root = self._node_for(root_path or Path.home())  # the start folder
         self.height = height
-        self.cursor: Node = self.root   # the selected folder node
-        self.scroll = 0                 # index of the first painted tree row
-        self.ratio = 0.3                # tree pane width fraction
+        self.scroll = 0                 # index of the first painted sidebar row
+        self.ratio = 0.2                # sidebar width fraction
         self.preview_ratio = 0.65       # details-vs-preview width fraction, within the body's second pane
         self.preview_visible = True     # `p`/header-× toggle; preview_ratio is kept either way
-        self.open: list[Node] = []      # folder nodes shown as tabs, in order
+        # One entry per tab: the folder it shows, and its own Back/Forward
+        # stacks (most recent last). There is always at least one tab.
+        self.open: list[Node] = [self.root]
+        self.back: list[list[Node]] = [[]]
+        self.forward: list[list[Node]] = [[]]
         self.active_tab = 0             # index into self.open
         self.message = ""               # transient status hint
         self.selected_file: Node | None = None  # last row selected/activated in a details tab
-        self.table_focus = False        # whether the active details table (vs the tree) has focus
-        # `build_root` already attempted the root's own load; surface it
-        # right away rather than leaving the tree looking like an ordinary
-        # empty folder with no explanation -- e.g. macOS blocking a
+        self.table_focus = True         # whether the active details table (vs the sidebar) has focus
+        # The start folder's own load was already attempted; surface a
+        # failure right away rather than leaving the list looking like an
+        # ordinary empty folder with no explanation -- e.g. macOS blocking a
         # sandboxed terminal's access to `~/Documents`.
         self._report_load_error(self.root)
 
@@ -1849,29 +2072,123 @@ class FileManager:
             except QuadrauiError:
                 pass
 
-    # --- navigation helpers --------------------------------------------------
+    # --- model + navigation helpers ------------------------------------------
 
-    def _visible(self) -> tuple[list[dict], list[Node]]:
-        """Current folder rows/nodes, with the cursor pulled back to its nearest
-        still-visible ancestor if a collapse hid it."""
-        rows, nodes = folder_rows(self.root)
-        if self.cursor not in nodes:
-            node = self.cursor
-            while node is not None and node not in nodes:
-                node = node.parent
-            self.cursor = node or self.root
-        return rows, nodes
+    def _node_for(self, path: Path) -> Node:
+        """The model node for `path`, built on demand. Every node hangs off
+        its filesystem root (`/`, `C:\\`), so any folder -- a sidebar place,
+        the start folder, a breadcrumb's ancestor -- has a real parent chain
+        to go Up through, and two routes to the same folder share one node.
+        Walks down from the root loading each ancestor (one directory read
+        per level, cached after that). A component the listing hides (a
+        dotfile named on the command line) gets a node of its own that its
+        parent's listing still doesn't show."""
+        path = Path(os.path.abspath(path))
+        anchor = path.anchor or os.sep
+        node = self._roots.get(anchor)
+        if node is None:
+            node = self._roots[anchor] = build_root(Path(anchor))
+        for part in path.relative_to(anchor).parts:
+            ensure_loaded(node)
+            match = next((c for c in node.children or () if c.name == part), None)
+            if match is None:
+                child_path = node.path / part
+                match = Node(name=part, path=child_path, is_dir=child_path.is_dir(),
+                             mtime=_safe_mtime(child_path), parent=node)
+            node = match
+        ensure_loaded(node)
+        return node
+
+    @property
+    def cursor(self) -> Node:
+        """The folder the active tab is showing -- what the status bar, the
+        window title, `r` and the sidebar highlight all follow."""
+        return self.open[self.active_tab]
+
+    def _sidebar(self) -> tuple[list[dict], list[PlaceSection | Place]]:
+        return sidebar_rows(self.sections, self.collapsed_sections)
+
+    def _sidebar_selected_index(self, entries: list[PlaceSection | Place]) -> int | None:
+        """Row index of the place the active tab is showing, if it is one."""
+        here = self.cursor.path
+        for i, entry in enumerate(entries):
+            if isinstance(entry, Place) and entry.path == here:
+                return i
+        return None
 
     def _move(self, delta: int) -> None:
-        rows, nodes = self._visible()
-        i = nodes.index(self.cursor)
-        new_i = max(0, min(len(nodes) - 1, i + delta))
-        self.cursor = nodes[new_i]
-        # The grid lists whatever the tree cursor lands on, the same way a
-        # tree-row click does (VS Code/Finder sidebar: selecting a folder
-        # *is* asking to see inside it). Keyboard and mouse selection now
-        # show the same thing; `_open` (Enter) still opens a *new* tab.
-        self._show_folder_in_active_tab(self.cursor)
+        """Sidebar Up/Down: step to the previous/next *place* (section rows
+        are skipped) and show it, the way arrowing through Finder's sidebar
+        does. From a folder that isn't a place, Down starts at the first one
+        and Up at the last."""
+        _rows, entries = self._sidebar()
+        places = [i for i, e in enumerate(entries) if isinstance(e, Place)]
+        if not places:
+            return
+        current = self._sidebar_selected_index(entries)
+        if current is None:
+            target = places[0] if delta > 0 else places[-1]
+        else:
+            pos = places.index(current)
+            target = places[max(0, min(len(places) - 1, pos + delta))]
+        place = entries[target]
+        self._navigate(self._node_for(place.path))
+
+    def _navigate(self, node: Node, *, select: Node | None = None, record: bool = True) -> None:
+        """Show `node` in the active tab, Explorer-style: the tab's previous
+        folder goes onto its Back stack (and Forward is cleared) unless
+        `record` is off -- Back/Forward themselves move between the stacks.
+        `select` pre-selects a row in the new listing (going Up selects the
+        folder you came from)."""
+        if not node.is_dir:
+            return
+        ensure_loaded(node)
+        self._report_load_error(node)
+        current = self.cursor
+        if record and node is not current:
+            self.back[self.active_tab].append(current)
+            self.forward[self.active_tab].clear()
+        self.open[self.active_tab] = node
+        self._set_selected_file(select)
+
+    def _go_back(self) -> None:
+        stack = self.back[self.active_tab]
+        if not stack:
+            self.message = "nothing to go back to"
+            return
+        self.forward[self.active_tab].append(self.cursor)
+        came_from = self.cursor
+        target = stack.pop()
+        self._navigate(target, select=came_from if came_from.parent is target else None, record=False)
+
+    def _go_forward(self) -> None:
+        stack = self.forward[self.active_tab]
+        if not stack:
+            self.message = "nothing to go forward to"
+            return
+        self.back[self.active_tab].append(self.cursor)
+        self._navigate(stack.pop(), record=False)
+
+    def _go_up(self) -> bool:
+        """Show the parent folder, selecting the one we came from. False at
+        a filesystem root (nowhere up to go)."""
+        here = self.cursor
+        if here.parent is None:
+            return False
+        self._navigate(here.parent, select=here)
+        return True
+
+    def _new_tab(self, node: Node) -> None:
+        """Open `node` in a new tab after the active one, and switch to it."""
+        ensure_loaded(node)
+        self._report_load_error(node)
+        at = self.active_tab + 1
+        self.open.insert(at, node)
+        self.back.insert(at, [])
+        self.forward.insert(at, [])
+        self.active_tab = at
+        self._set_selected_file(None)
+        self.table_focus = True
 
     def _tree_capacity(self) -> int:
         """Painted rows that fit in the body's row band: the app's measured
@@ -2060,11 +2377,11 @@ class FileManager:
             anchor = (x, 0.0, 1.0, self._chrome_line_height)
             return anchor, {"id": "fm:tooltip:toolbar", "text": text}
         if kind == "tree":
-            rows, nodes = self._visible()
+            _rows, entries = self._sidebar()
             row = hover["row"]
-            if row is None or not (0 <= row < len(nodes)):
-                return None, None
-            node = nodes[row]
+            if row is None or not (0 <= row < len(entries)) or not isinstance(entries[row], Place):
+                return None, None  # section headers explain themselves
+            node = self._node_for(entries[row].path)
             x = left_inset + _TREE_BORDER_INSET
             y = (
                 self._chrome_line_height
@@ -2106,38 +2423,6 @@ class FileManager:
             self.scroll = cursor_index - capacity + 1
         self.scroll = max(0, min(self.scroll, max(0, row_count - capacity)))
 
-    def _expand(self) -> None:
-        """Expand the cursored folder (loading it on demand); if it is already
-        expanded, descend into its first subfolder."""
-        node = self.cursor
-        if not node.is_dir:
-            return
-        ensure_loaded(node)
-        self._report_load_error(node)
-        subdirs = node.subdirs()
-        if not node.expanded and subdirs:
-            node.expanded = True
-        elif node.expanded and subdirs:
-            self.cursor = subdirs[0]
-            self._show_folder_in_active_tab(self.cursor)  # grid follows the cursor
-
-    def _collapse(self) -> None:
-        """Collapse the cursored folder; if already collapsed, jump to parent."""
-        node = self.cursor
-        if node.is_dir and node.expanded:
-            node.expanded = False
-        elif node.parent is not None:
-            self.cursor = node.parent
-            self._show_folder_in_active_tab(self.cursor)  # grid follows the cursor
-
-    def _reveal(self, node: Node) -> None:
-        """Expand every ancestor so `node` is a visible tree row."""
-        parent = node.parent
-        while parent is not None:
-            ensure_loaded(parent)
-            parent.expanded = True
-            parent = parent.parent
-
     def _report_load_error(self, node: Node) -> None:
         """After an `ensure_loaded(node)` that may have just failed: if it
         did, set `self.message` naming the folder and the OS's own reason
@@ -2154,57 +2439,41 @@ class FileManager:
             )
             self.message = f"Can't read {node.path}: {reason}{hint}"
 
-    def _show_folder_in_active_tab(self, node: Node) -> None:
-        """A tree-row click: show `node`'s listing in the details pane,
-        replacing the active tab's folder (VS Code/Finder sidebar
-        behaviour) rather than opening a new tab -- opening a new tab stays
-        a deliberate action (`_open`, via Enter / the context menu). With
-        no tab open yet, opens the first one."""
-        ensure_loaded(node)
-        self._report_load_error(node)
-        if not self.open:
-            self.open.append(node)
-            self.active_tab = 0
-            return
-        self.open[self.active_tab] = node
-
     def _open(self, node: Node | None = None) -> None:
-        """Open `node` (default: the cursor) as a details tab, expanding it;
-        focus its tab if already open. A file just reports itself.
-
-        Opening a folder also hands key focus to the opened tab's table --
-        "opened it, now you're in it": the next arrows navigate that listing
-        (`_on_grid_arrow`) instead of the tree cursor, and Left on the root
-        listing hands focus back, so the keyboard covers both panes."""
-        node = node or self.cursor
+        """`t`: open `node` (default: the selected folder row, else the
+        current folder) in a new tab. A file just reports itself."""
+        if node is None:
+            selected = self.selected_file
+            if selected is not None and selected.is_dir and selected in (self.cursor.children or ()):
+                node = selected
+            else:
+                node = self.cursor
         if not node.is_dir:
             self.message = f"{node.name} ({_human_size(node.size_bytes)})"
             return
-        ensure_loaded(node)
-        self._report_load_error(node)
-        for i, existing in enumerate(self.open):
-            if existing.path == node.path:
-                self.active_tab = i
-                self.table_focus = True
-                return
-        self.open.append(node)
-        self.active_tab = len(self.open) - 1
-        self.table_focus = True
+        self._new_tab(node)
 
     def _refresh(self) -> None:
         node = self.cursor
-        if node.is_dir:
-            node.children = None
-            ensure_loaded(node)
-            self._report_load_error(node)
-            if not node.load_error:
-                self.message = f"reloaded {node.name}"
+        node.children = None
+        ensure_loaded(node)
+        self._report_load_error(node)
+        if not node.load_error:
+            self.message = f"reloaded {node.name or node.path}"
+        if self.selected_file is not None and self.selected_file not in node.children:
+            self._set_selected_file(None)
 
     def _close_tab(self, index: int) -> None:
-        if 0 <= index < len(self.open):
-            del self.open[index]
-            if self.active_tab >= len(self.open):
-                self.active_tab = max(0, len(self.open) - 1)
+        """Close tab `index` -- unless it's the last one: like Explorer's,
+        the window always browses somewhere."""
+        if not (0 <= index < len(self.open)):
+            return
+        if len(self.open) == 1:
+            self.message = "the last tab stays open"
+            return
+        del self.open[index], self.back[index], self.forward[index]
+        if self.active_tab > index or self.active_tab >= len(self.open):
+            self.active_tab = max(0, self.active_tab - 1)
 
     def _toggle_preview(self) -> None:
         """`p`: show/hide the preview pane (its header and content both).
@@ -2212,34 +2481,40 @@ class FileManager:
         restores the same divider position it had before."""
         self.preview_visible = not self.preview_visible
 
-    def _on_row_click(self, path: list[int]) -> None:
-        """A tree-row click: select that folder and show it in the details
-        pane (see `_show_folder_in_active_tab`), without touching its
-        expansion state -- only the chevron (`_on_row_toggle_expand`) or
-        Left/Right (`_expand`/`_collapse`) ever expands or collapses a row,
-        so clicking around the tree is never "jumpy"."""
-        rows, nodes = folder_rows(self.root)
-        for row, node in zip(rows, nodes):
+    def _sidebar_entry(self, path: list[int]) -> PlaceSection | Place | None:
+        rows, entries = self._sidebar()
+        for row, entry in zip(rows, entries):
             if row["path"] == list(path):
-                self.cursor = node
-                self.table_focus = False  # a tree click always hands focus back to the tree
-                self._show_folder_in_active_tab(node)
-                return
+                return entry
+        return None
+
+    def _toggle_section(self, section: PlaceSection) -> None:
+        if section.title in self.collapsed_sections:
+            self.collapsed_sections.discard(section.title)
+        else:
+            self.collapsed_sections.add(section.title)
+
+    def _on_row_click(self, path: list[int]) -> None:
+        """A sidebar click: a place shows in the active tab; a section
+        header folds/unfolds its section (Finder's Show/Hide)."""
+        entry = self._sidebar_entry(path)
+        self.table_focus = False  # a sidebar click hands key focus to the sidebar
+        if isinstance(entry, Place):
+            self._navigate(self._node_for(entry.path))
+        elif isinstance(entry, PlaceSection):
+            self._toggle_section(entry)
 
     def _on_row_toggle_expand(self, path: list[int]) -> None:
-        """A chevron click: toggle that folder's expansion in place, leaving
-        the cursor wherever it already was (a row-body click selects the row
-        too; the chevron is narrower, since it is reachable without first
-        moving the cursor there)."""
-        rows, nodes = folder_rows(self.root)
-        for row, node in zip(rows, nodes):
-            if row["path"] == list(path):
-                self.table_focus = False  # a tree click always hands focus back to the tree
-                ensure_loaded(node)
-                self._report_load_error(node)
-                if node.subdirs():
-                    node.expanded = not node.expanded
-                return
+        """A chevron click -- only section headers have one."""
+        entry = self._sidebar_entry(path)
+        self.table_focus = False
+        if isinstance(entry, PlaceSection):
+            self._toggle_section(entry)
+
+    def _on_sidebar_enter(self) -> None:
+        """Enter/`o` with the sidebar focused: there's nothing to open that
+        isn't already showing, so hand key focus to the list."""
+        self.table_focus = True
 
     def _visible_children(self, folder: Node) -> list[Node]:
         """`folder`'s children in the details table's current display order:
@@ -2289,8 +2564,8 @@ class FileManager:
 
     def _activate_detail(self, idx: int) -> None:
         """A details-table row was *activated* (double-click, Enter once the
-        table has focus, or the context menu's Open): drill into a
-        subfolder, or select the file and queue opening it with the OS's
+        table has focus, or the context menu's Open): navigate the tab into
+        a subfolder, or select the file and queue opening it with the OS's
         default app. `idx` indexes the same filtered/sorted order the table
         was painted with, not raw `folder.children`."""
         if not self.open:
@@ -2302,10 +2577,7 @@ class FileManager:
         self.table_focus = True
         child = children[idx]
         if child.is_dir:
-            folder.expanded = True
-            self._reveal(child)
-            self.cursor = child
-            self._open(child)
+            self._navigate(child)  # Explorer: open a folder in place
         else:
             self._set_selected_file(child)
             self.message = f"opening {child.name} ({_human_size(child.size_bytes)})"
@@ -2313,71 +2585,48 @@ class FileManager:
 
     def _open_table_selection_or_cursor(self) -> None:
         """Enter/`o`: the real backends route Enter straight to
-        `DataTable/RowActivated` once the table has focus and a row is
-        selected (see `_handle`'s `DataTable` branch) -- this only runs for
-        `o` (which the table never intercepts; see `details_table`'s own
-        doc on `data_table_key_event`) and for Enter the engine did not
-        rewrite: the tree focused, the table focused but nothing selected
-        yet, or the table holding the keyboard handoff `_open` made (no
-        `MouseDown` ever focused it, so the engine never engages). Opens the
-        table's current selection if the table has focus and it's still
-        listed in the active tab; otherwise falls back to opening the tree
-        cursor (`_open`)."""
-        if self.table_focus and self.open:
-            folder = self.open[self.active_tab]
-            children = self._visible_children(folder)
-            if self.selected_file in children:
-                self._activate_detail(children.index(self.selected_file))
-                return
-        self._open()
+        `DataTable/RowActivated` once the table has engine focus and a row
+        is selected (see `_dispatch`'s `DataTable` branch) -- this runs for
+        `o` (which the table never intercepts) and for an Enter the engine
+        did not rewrite. With the list focused, opens its selection (if
+        still listed); with the sidebar focused, hands focus to the list."""
+        if not self.table_focus:
+            self._on_sidebar_enter()
+            return
+        children = self._visible_children(self.cursor)
+        if self.selected_file in children:
+            self._activate_detail(children.index(self.selected_file))
 
     def _on_grid_arrow(self, name: str) -> None:
-        """An arrow key while a details table has key focus (a row click, or
-        the handoff `_open` makes when it opens a folder). Arrows act on the
-        focused pane: Up/Down move that table's row selection -- the engine
-        rewrites those into `RowSelected` itself only from a real mouse
-        `MouseDown` on the table (see `details_table`'s own doc), so a
-        keyboard handoff handles them here, through the same `_select_detail`
-        a rewritten event would reach -- Right drills into the selected
-        folder row (a file row only hints at Enter, since handing it to the
-        OS is what Enter/`o` are for), and Left steps up to the parent
-        listing, focusing its tab when it is still open (it usually is:
-        Right opened a new one to get here). Left on the root listing has
-        nowhere up to go and hands key focus back to the tree instead: the
-        keyboard way out of the grid, so a session that entered it without
-        touching the mouse can leave it the same way."""
-        if not self.open:
-            return
-        folder = self.open[self.active_tab]
-        children = self._visible_children(folder)
+        """An arrow key while the list has key focus. Up/Down move the row
+        selection -- the engine rewrites those into `RowSelected` itself
+        only after a real mouse `MouseDown` on the table, so a keyboard
+        session handles them here, through the same `_select_detail`.
+        Right opens the selected folder in place (a file row only hints at
+        Enter, since handing it to the OS is what Enter/`o` are for); Left
+        goes up to the parent, selecting the folder we came from, and at a
+        filesystem root hands key focus to the sidebar -- the keyboard way
+        across, alongside Tab."""
+        children = self._visible_children(self.cursor)
         if name in ("Up", "Down"):
             idx = -1  # nothing selected yet: either arrow lands on the first row
-            if self.selected_file is not None:
-                for i, child in enumerate(children):
-                    if child.path == self.selected_file.path:
-                        idx = i
-                        break
+            if self.selected_file in children:
+                idx = children.index(self.selected_file)
             idx = min(idx + 1, len(children) - 1) if name == "Down" else max(idx - 1, 0)
             if 0 <= idx < len(children):
                 self._select_detail(idx)
             return
         if name == "Right":
-            if self.selected_file is None:
-                return
-            for i, child in enumerate(children):
-                if child.path == self.selected_file.path:
-                    if child.is_dir:
-                        self._activate_detail(i)  # drill in; focus follows via _open
-                    else:
-                        self.message = f"{child.name} is a file — press Enter to open it"
-                    return
-            return  # selection is not in this listing (a filter narrowed it out)
-        parent = folder.parent
-        if parent is not None:
-            self._open(parent)  # step up; key focus stays in the grid
-        else:
-            self.table_focus = False  # at the root: back to the tree
-            self.message = "arrows are back on the tree"
+            if self.selected_file not in children:
+                return  # nothing selected here (or a filter narrowed it out)
+            if self.selected_file.is_dir:
+                self._activate_detail(children.index(self.selected_file))
+            else:
+                self.message = f"{self.selected_file.name} is a file — press Enter to open it"
+            return
+        if not self._go_up():
+            self.table_focus = False
+            self.message = "arrows are on the sidebar"
 
     # --- file actions: delete/trash, open, reveal, context menu -------------
     #
@@ -2401,16 +2650,21 @@ class FileManager:
             return
         self.actions.reveal_in_file_manager(str(node.path))
 
-    def _delete_candidate(self) -> Node:
-        """What a bare Delete keystroke (or the `Menu` key, or F2) acts on:
-        the last details-table row selected in the *current* tab -- by a
-        click, Up/Down, or an activation -- if it's still listed there, else
-        the tree cursor. Can be a folder as well as a file: a single click
-        on a folder row selects it the same as a file row does, so it
-        becomes the candidate too, same as selecting it in the tree would."""
-        if self.open and self.selected_file in (self.open[self.active_tab].children or ()):
+    def _delete_candidate(self) -> Node | None:
+        """What Delete / the `Menu` key / F2 act on: the row selected in the
+        current listing -- by a click, Up/Down, or an activation -- if it's
+        still listed there. Like Finder/Explorer, nothing selected means
+        nothing to act on: the folder being browsed is never the target."""
+        if self.selected_file in (self.cursor.children or ()):
             return self.selected_file
-        return self.cursor
+        return None
+
+    def _protected(self, node: Node) -> bool:
+        """Never rename or trash a filesystem root or a sidebar place
+        (Desktop, Documents, the home folder...)."""
+        return node.parent is None or any(
+            place.path == node.path for section in self.sections for place in section.places
+        )
 
     # --- filter box, inline rename -------------------------------------------
     #
@@ -2426,13 +2680,16 @@ class FileManager:
         self.edit_mode = "filter"
         self.edit_text = self.filter_text
 
-    def _start_rename(self, node: Node) -> None:
+    def _start_rename(self, node: Node | None) -> None:
         """F2: open an inline rename box seeded with `node`'s current name,
         and mark the window dirty (C13) where that's safe (see
         `native_window_chrome`'s own doc) -- cleared again by
         `_commit_edit`/`_cancel_edit`."""
-        if node is self.root:
-            self.message = "can't rename the browser's root"
+        if node is None:
+            self.message = "select something to rename"
+            return
+        if self._protected(node):
+            self.message = f"can't rename {node.name or node.path}"
             return
         self.edit_mode = "rename"
         self.rename_target = node
@@ -2469,6 +2726,15 @@ class FileManager:
         open)."""
         if "CharTyped" in event:
             self._edit_insert(event["CharTyped"])
+            return True
+        table = event.get("DataTable")
+        if isinstance(table, (list, tuple)) and len(table) == 2 and "RowActivated" in table[1]:
+            # The engine keeps key focus on a table that was clicked and
+            # rewrites Enter into `RowActivated` from its *own* selection
+            # state, even though `_details_pane` paints no selection while a
+            # box is open -- so that Enter arrives here as an activation.
+            # It was meant for the box.
+            self._commit_edit()
             return True
         key = _event_key(event)
         if key is None:
@@ -2550,10 +2816,13 @@ class FileManager:
             parent.children.sort(key=_sort_key)
         self.message = f"renamed to {new_name}"
 
-    def _request_delete(self, node: Node) -> None:
+    def _request_delete(self, node: Node | None) -> None:
         """Put up a Cancel/Delete confirm dialog for `node`."""
-        if node is self.root:
-            self.message = "can't trash the browser's root"
+        if node is None:
+            self.message = "select something to move to the Trash"
+            return
+        if self._protected(node):
+            self.message = f"can't move {node.name or node.path} to the Trash"
             return
         self._delete_target = node
         kind = "folder" if node.is_dir else "file"
@@ -2597,10 +2866,11 @@ class FileManager:
         if button_id == "delete" and target is not None:
             self._trash(target)
 
-    def _request_context_menu(self, node: Node) -> None:
+    def _request_context_menu(self, node: Node | None) -> None:
         """Put up a context menu (Open / Reveal in file manager / Move to
-        Trash) for `node`."""
-        self._menu_target = node
+        Trash) for `node` -- the folder being browsed when nothing is
+        selected, like a right-click on a listing's empty space."""
+        self._menu_target = node or self.cursor
         self.actions.show_context_menu(
             items=[
                 {"id": "open", "label": _styled_text("Open")},
@@ -2695,16 +2965,25 @@ class FileManager:
 
     def _forget(self, node: Node) -> None:
         """Drop `node` from the model after it's been trashed: remove it from
-        its parent's children, close its details tab if it had one, and pull
-        the cursor/selection off it."""
+        its parent's children, move any tab showing it (or something inside
+        it) up to its parent, scrub it from every tab's history, and pull
+        the selection off it."""
         parent = node.parent
         if parent is not None and parent.children is not None:
             parent.children = [c for c in parent.children if c is not node]
-        self.open = [f for f in self.open if f is not node]
-        if self.active_tab >= len(self.open):
-            self.active_tab = max(0, len(self.open) - 1)
-        if self.cursor is node:
-            self.cursor = parent or self.root
+
+        def gone(folder: Node) -> bool:
+            while folder is not None:
+                if folder is node:
+                    return True
+                folder = folder.parent
+            return False
+
+        for i, folder in enumerate(self.open):
+            if gone(folder):
+                self.open[i] = parent or folder
+            self.back[i] = [f for f in self.back[i] if not gone(f)]
+            self.forward[i] = [f for f in self.forward[i] if not gone(f)]
         if self.selected_file is node:
             self._set_selected_file(None)
 
@@ -2884,17 +3163,64 @@ class FileManager:
 
     # --- render + handle -----------------------------------------------------
 
+    def _folder_label(self, node: Node) -> str:
+        """Display name for a folder: its own name, or for a filesystem root
+        the sidebar's name for it ("Macintosh HD") when there is one."""
+        if node.parent is None:
+            for section in self.sections:
+                for place in section.places:
+                    if place.path == node.path:
+                        return place.label
+            return str(node.path)
+        return node.name
+
+    def _crumbs(self) -> list[Node]:
+        """The active tab's folder and its ancestors, root first."""
+        chain: list[Node] = []
+        node: Node | None = self.cursor
+        while node is not None:
+            chain.append(node)
+            node = node.parent
+        return chain[::-1]
+
+    def _address_leaf(self, index: int, folder: Node) -> dict:
+        """One tab's address bar: the folder's path as clickable breadcrumbs
+        (Explorer's address bar / Finder's path bar). A `status_bar` because
+        its segments are the one clickable-text-run primitive there is
+        (a real breadcrumbs primitive: JDonaghy/quadraui#2452) --
+        each crumb's `action_id` comes back as a `SegmentClicked`. Only the
+        active tab's crumbs are live; the others aren't on screen."""
+        chain: list[Node] = []
+        node: Node | None = folder
+        while node is not None:
+            chain.append(node)
+            node = node.parent
+        chain.reverse()
+        segments = []
+        for depth, crumb in enumerate(chain):
+            if depth:
+                segments.append(self._segment("›"))
+            last = depth == len(chain) - 1
+            segments.append(
+                self._segment(
+                    f" {self._folder_label(crumb)} ",
+                    bold=last,
+                    action_id=None if last else f"{CRUMB_ACTION_PREFIX}{depth}",
+                )
+            )
+        return {
+            "id": f"fm:addr:{index}",
+            "status_bar": {"id": f"fm:addr:{index}", "left_segments": segments, "right_segments": []},
+        }
+
     def _details_pane(self) -> dict:
-        """The body split's second pane: a placeholder until a folder is opened,
-        then a closable tabs container with one data_table tab per open folder."""
-        if not self.open:
-            return {
-                "id": "fm:empty",
-                "text_display": {
-                    "id": "fm:empty",
-                    "lines": [_styled_text("Select a folder and press Enter to open it.")],
-                },
-            }
+        """The body split's second pane: a one-row `tab_bar` (one tab per
+        browsing location) over the active tab's address bar, over its
+        folder's data_table -- each bar held to one chrome row by
+        `first_min`. A raw `tab_bar` leaf rather than the `tabs` layout node,
+        whose TUI strip reserves two blank rows under the tab labels
+        (JDonaghy/quadraui#2446); only
+        the active tab's content exists, which is all either one paints."""
 
         def _grid(i: int, folder: Node) -> dict:
             children = self._visible_children(folder)
@@ -2925,25 +3251,49 @@ class FileManager:
                 nerd_fonts_enabled=self._nerd_fonts_enabled,
             )
 
-        return {
-            "id": "fm:tabs",
-            "tabs": {
-                "id": "fm:tabs",
-                "selected": self.active_tab,
-                "closable": True,
+        header_rows = self._chrome_line_height / self._line_height
+        available = max(3.0, float(self._tree_capacity()))
+        i = self.active_tab
+        folder = self.cursor
+        closable = len(self.open) > 1
+        tab_bar = {
+            "id": TAB_BAR_ID,
+            "tab_bar": {
+                "id": TAB_BAR_ID,
                 "tabs": [
-                    {
-                        "id": f"tab:{i}",
-                        "title": folder.name,
-                        "closable": True,
-                        "content": {
-                            "id": f"fm:grid:{i}",
-                            "data_table": _grid(i, folder),
-                        },
-                    }
-                    for i, folder in enumerate(self.open)
+                    {"label": self._folder_label(f), "is_active": n == i, "is_closable": closable}
+                    for n, f in enumerate(self.open)
                 ],
+                "show_tab_close": closable,
             },
+        }
+        # Only each bar's own row is pinned (`first_min`); the listing takes
+        # whatever is left, so no `second_min` has to guess the band height.
+        listing = {
+            "split": {
+                "id": "fm:addr_split",
+                "orientation": "vertical",  # address bar over the listing
+                "ratio": header_rows / available,
+                "first_min": header_rows,
+                "second_min": 1.0,
+                "first": self._address_leaf(i, folder),
+                "second": (
+                    unreadable_leaf(folder, f"fm:grid:{i}")
+                    if folder.load_error
+                    else {"id": f"fm:grid:{i}", "data_table": _grid(i, folder)}
+                ),
+            }
+        }
+        return {
+            "split": {
+                "id": "fm:tab_split",
+                "orientation": "vertical",  # tab strip over the active tab
+                "ratio": header_rows / available,
+                "first_min": header_rows,
+                "second_min": 1.0,
+                "first": tab_bar,
+                "second": listing,
+            }
         }
 
     def _preview_column_width_cells(self) -> float:
@@ -3079,7 +3429,7 @@ class FileManager:
         return segment
 
     def _status_leaf(self) -> dict:
-        """The outer split's bottom pane: a live status bar showing the cursored
+        """The outer split's bottom pane: a live status bar showing the current
         folder, its item count, the open-tab summary, and any transient hint."""
         node = self.cursor
         if node.children is None:
@@ -3087,7 +3437,7 @@ class FileManager:
         else:
             count_text = f"{len(node.children)} items"
         left = [
-            self._segment(f" {node.name} ", accent=True, bold=True),
+            self._segment(f" {self._folder_label(node)} ", accent=True, bold=True),
             self._segment(f" {count_text} "),
         ]
         if self.message:
@@ -3099,11 +3449,7 @@ class FileManager:
             left.append(self._segment(f" reloads: {self.reload_count} "))
         if self.filter_text:
             left.append(self._segment(f' filter: "{self.filter_text}" '))
-        open_n = len(self.open)
-        if open_n:
-            right = [self._segment(f" tab {self.active_tab + 1}/{open_n} ")]
-        else:
-            right = [self._segment(" no tabs ")]
+        right = [self._segment(f" tab {self.active_tab + 1}/{len(self.open)} ")]
         right.append(self._segment(f" {int(round(self.ratio * 100))}% "))
         return {
             "id": "fm:status",
@@ -3134,7 +3480,7 @@ class FileManager:
     def _render(self) -> dict:
         """Per-frame: rebuild the whole frame from state. An outer vertical split
         stacks the chrome+body (top) over a one-line status bar (bottom); the
-        body is the resizable tree/(details|preview) split, wrapped in a
+        body is the resizable sidebar/(details|preview) split, wrapped in a
         `sidebar_panel` whose reserved slot paints the toolbar above it. The
         details and preview panes are themselves a nested resizable split, so
         the frame is sidebar | details | preview overall -- unless
@@ -3143,10 +3489,11 @@ class FileManager:
         second slot on its own, giving its width back without disturbing
         `preview_ratio` (restored from, unchanged, the next time the
         preview is shown again). Reads only."""
-        rows, nodes = self._visible()
-        cursor_index = nodes.index(self.cursor)
-        selected_path = rows[cursor_index]["path"]
-        self._scroll_to_cursor(cursor_index, len(rows))
+        rows, entries = self._sidebar()
+        selected_index = self._sidebar_selected_index(entries)
+        selected_path = None if selected_index is None else rows[selected_index]["path"]
+        if selected_index is not None:
+            self._scroll_to_cursor(selected_index, len(rows))
         details_and_preview = (
             {
                 "split": {
@@ -3166,7 +3513,7 @@ class FileManager:
                 "id": "fm:split",
                 "orientation": "horizontal",  # panes side by side, vertical divider
                 "ratio": self.ratio,
-                "first": tree_leaf(
+                "first": sidebar_leaf(
                     rows,
                     selected_path=selected_path,
                     scroll_offset=self.scroll,
@@ -3287,6 +3634,17 @@ class FileManager:
             self._on_hover_timer(event["User"])
             return
 
+        if "FocusChanged" in event:
+            # The engine owns Tab/Shift-Tab focus cycling: it consumes the
+            # key and reports only where focus landed. Mirror that into
+            # `table_focus` so arrows follow the focus ring.
+            focused = event["FocusChanged"]
+            if focused == "fm:tree":
+                self.table_focus = False
+            elif isinstance(focused, str) and focused.startswith("fm:grid:"):
+                self.table_focus = True
+            return
+
         if self.edit_mode is not None and self._handle_edit_key(event):
             return
 
@@ -3341,7 +3699,10 @@ class FileManager:
         elif "TabBar" in event:
             activation = event["TabBar"][1]
             if "TabActivated" in activation:
-                self.active_tab = activation["TabActivated"]["index"]
+                index = activation["TabActivated"]["index"]
+                if index != self.active_tab and 0 <= index < len(self.open):
+                    self.active_tab = index
+                    self._set_selected_file(None)
             elif "TabClosed" in activation:
                 self._close_tab(activation["TabClosed"]["index"])
         elif "StatusBar" in event:
@@ -3350,6 +3711,8 @@ class FileManager:
                 clicked_id = activation["SegmentClicked"]["id"]
                 if clicked_id == PREVIEW_HEADER_CLOSE_ACTION:
                     self.preview_visible = False
+                elif clicked_id.startswith(CRUMB_ACTION_PREFIX):
+                    self._on_crumb(int(clicked_id[len(CRUMB_ACTION_PREFIX):]))
         elif "SplitDividerDragged" in event:
             drag = event["SplitDividerDragged"]
             # Only the two body splits are user-resizable; the outer
@@ -3374,47 +3737,43 @@ class FileManager:
                 self._dragging = True
                 self.actions.set_cursor("col_resize")
 
+    def _on_crumb(self, depth: int) -> None:
+        """An address-bar breadcrumb click: jump to that ancestor, selecting
+        the child of it we came down through."""
+        chain = self._crumbs()
+        if 0 <= depth < len(chain) - 1:
+            self._navigate(chain[depth], select=chain[depth + 1])
+
     def _on_key(self, name: str) -> None:
         self.message = ""
         if name in ("Down", "Up", "Right", "Left"):
             # Arrows act on whichever pane has key focus (`table_focus` is
-            # this app's single source of truth for that -- see the model
-            # comment at its definition): with key focus in a details table
-            # they navigate that listing (`_on_grid_arrow`), else the tree
-            # cursor. The engine rewrites Up/Down into `RowSelected` (and
-            # Enter into `RowActivated`) only from a real mouse `MouseDown`
-            # on the table -- a keyboard handoff (`_open`) still delivers
-            # all four here -- and Left/Right are never rewritten, click or
-            # not, so the grid branch is what keeps those off the tree too.
-            # The grid also needs to still exist: closing its last tab
-            # leaves `table_focus` stale until the next click, and arrows
-            # should walk the tree again, not die.
-            if self.table_focus and self.open:
+            # this app's single source of truth for that). The engine
+            # rewrites Up/Down into `RowSelected` (and Enter into
+            # `RowActivated`) only after a real mouse `MouseDown` on the
+            # table, so a keyboard session delivers all four here.
+            if self.table_focus:
                 self._on_grid_arrow(name)
-                return
-            self.table_focus = False  # belt-and-braces: this far means tree
-            if name == "Down":
+            elif name == "Down":
                 self._move(1)
             elif name == "Up":
                 self._move(-1)
             elif name == "Right":
-                self._expand()
-            else:
-                self._collapse()
-        elif name == "Enter":
-            # A focused table with a row selected already turned this into
-            # `DataTable/RowActivated` before it ever reached here (see
-            # `_handle`) -- but that rewriting, exactly like Up/Down's,
-            # engages only from a real mouse `MouseDown` on the table, and
-            # key focus can now reach the grid without one (`_open` hands
-            # it over), so this routes by focus the same way `o` does
-            # instead of assuming the tree cursor is the only target.
+                self.table_focus = True
+        elif name in ("Tab", "BackTab"):
+            # Only reached where the engine doesn't cycle focus itself (it
+            # normally consumes Tab and sends `FocusChanged` instead).
+            self.table_focus = not self.table_focus
+        elif name in ("Enter", "o"):
             self._open_table_selection_or_cursor()
-        elif name == "o":
-            # The table never intercepts `o` (unlike Enter) regardless of
-            # which one has real focus, so this is the one key that still
-            # needs `table_focus` to decide between the two targets.
-            self._open_table_selection_or_cursor()
+        elif name in ("Backspace", "["):
+            self._go_back()
+        elif name == "]":
+            self._go_forward()
+        elif name == "t":
+            self._open()
+        elif name == "w":
+            self._close_tab(self.active_tab)
         elif name == "r":
             self._refresh()
         elif name == "Delete":
@@ -3482,10 +3841,13 @@ class FileManager:
         if self.edit_mode is not None or self._delete_target is not None or self._menu_target is not None:
             return
         self.message = ""
-        if button_id == TOOLBAR_EXPAND_ID:
-            self._expand()
-        elif button_id == TOOLBAR_COLLAPSE_ID:
-            self._collapse()
+        if button_id == TOOLBAR_BACK_ID:
+            self._go_back()
+        elif button_id == TOOLBAR_FORWARD_ID:
+            self._go_forward()
+        elif button_id == TOOLBAR_UP_ID:
+            if not self._go_up():
+                self.message = "already at the top"
         elif button_id == TOOLBAR_OPEN_ID:
             self._open_table_selection_or_cursor()
         elif button_id == TOOLBAR_PREVIEW_ID:
@@ -3520,15 +3882,13 @@ def _dump(node: Node, indent: int = 0) -> None:
         print(f"{pad}  {node.name}{size}")
 
 
-def _dump_folder_rows(rows: list[dict]) -> None:
-    """Human-readable dump of the folders-only tree rows."""
+def _dump_sidebar_rows(rows: list[dict]) -> None:
+    """Human-readable dump of the sidebar rows."""
     for row in rows:
         pad = "  " * row["indent"]
-        chevron = "▾ " if row["is_expanded"] else "▸ "
-        glyph = row["icon"]["glyph"]
+        chevron = ("▾ " if row["is_expanded"] else "▸ ") if row["is_expanded"] is not None else "  "
         text = row["text"]["spans"][0]["text"]
-        path = ",".join(str(i) for i in row["path"]) or "-"
-        print(f"  path=[{path:<8}] {pad}{chevron}{glyph} {text}")
+        print(f"  {pad}{chevron}{text}")
 
 
 def _dump_grid(descriptor: dict) -> None:
@@ -3545,14 +3905,14 @@ def _dump_grid(descriptor: dict) -> None:
         print("  " + _row_text(cells_text))
 
 
-def _dump_steps(root_path: Path) -> None:
-    root = build_root(root_path)
-    print("# model (root loaded one level)")
+def _dump_steps(root_path: Path | None) -> None:
+    root = build_root(root_path) if root_path else build_root(Path.home())
+    print("# sidebar")
+    rows, _entries = sidebar_rows(default_sections(), set())
+    _dump_sidebar_rows(rows)
+    print(f"\n# model ({root.path}, loaded one level)")
     _dump(root)
-    print("\n# folders-only tree rows")
-    rows, _nodes = folder_rows(root)
-    _dump_folder_rows(rows)
-    print("\n# details table for the root folder")
+    print(f"\n# details table for {root.path}")
     _dump_grid(details_table(root, 0))
 
 
@@ -3613,35 +3973,30 @@ def _key_event(key: dict) -> dict:
 
 
 def _run_headless(fm: FileManager) -> None:
-    """Drive the app with Python owning the loop: expand a folder, open it as a
-    tab, drill into a subfolder from its details table, then print the final
-    screen -- runnable with no feature build."""
+    """Drive the app with Python owning the loop: select the first row of
+    the start folder, open it (a folder navigates in place), then print the
+    final screen -- runnable with no feature build."""
     steps = [
-        _key_event(DOWN_KEY),    # cursor onto the first subfolder
-        _key_event(RIGHT_KEY),   # expand it (load on demand)
-        _key_event(ENTER_KEY),   # open it as a details tab
-        # Double-click the first details row (a real double-click would
-        # deliver this), drilling into it if it is a subfolder.
-        {"DataTable": ["fm:grid:0", {"RowDoubleClicked": {"idx": 0}}]},
+        _key_event(DOWN_KEY),    # select the first row
+        _key_event(ENTER_KEY),   # open it: a folder navigates the tab in place
     ]
     for event in steps:
         fm.step(event)
     print(fm.app.screen())
-    open_names = [n.name for n in fm.open]
-    print(f"\ncursor={fm.cursor.name}  open_tabs={open_names}  "
-          f"active_tab={fm.active_tab}  ratio={fm.ratio}")
+    print(f"\nfolder={fm.cursor.path}  tabs={[str(n.path) for n in fm.open]}  "
+          f"back={[str(n.path) for n in fm.back[fm.active_tab]]}")
 
 
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
-    root = Path(args[0]) if args else Path.cwd()
+    root = Path(args[0]).resolve() if args else None  # no PATH: home, like Finder
 
     if "--dump" in flags:
-        _dump_steps(root.resolve())
+        _dump_steps(root)
         sys.exit(0)
 
-    fm = FileManager(root.resolve())
+    fm = FileManager(root)
 
     if "--reload" in flags:
         fm.enable_hot_reload()  # re-import this module on save, keeping state

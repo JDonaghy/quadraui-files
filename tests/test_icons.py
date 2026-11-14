@@ -1,4 +1,4 @@
-"""F6 black-box coverage: folder/file codicon markers in the tree and the
+"""F6 black-box coverage: codicon markers in the sidebar and the
 details pane. The TUI backend defaults `nerd_fonts_enabled` off (its own
 conservative default -- see `app.py`'s `_nerd_fonts_enabled` doc), so every
 other suite in this repo exercises the ASCII-fallback half of these markers
@@ -17,6 +17,8 @@ from quadraui_files.app import (
     _CODICON_ZIP_GLYPH,
     DOWN_KEY,
     ENTER_KEY,
+    Place,
+    PlaceSection,
     _key_event,
 )
 
@@ -30,23 +32,20 @@ def _enable_nerd_fonts(fm: FileManager) -> None:
     fm._nerd_fonts_enabled = fm.app.nerd_fonts_enabled()
 
 
-def test_tree_folder_row_shows_the_folder_codicon_once_nerd_fonts_are_on(tmp_path):
-    # A fixed, short root name, unlike `sample_tree` (which hands back
-    # `tmp_path` itself, named after this test's own -- long -- node id):
-    # this test is about the codicon marker, not about how much of a long
-    # name the narrowed, bordered tree pane can still fit -- see
-    # `tests/test_tree_click.py`'s own `test_root_row_stays_painted_on_screen_
-    # after_a_tree_click` for the same reasoning.
+def test_sidebar_place_row_shows_its_codicon_once_nerd_fonts_are_on(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     (root / "alpha").mkdir()
-    fm = FileManager(root, width=120, height=20)
-    assert f"/ {fm.cursor.name}" in fm.app.screen(), "ASCII fallback by default"
+    fm = FileManager(
+        root, width=120, height=20,
+        sections=[PlaceSection("Favorites", (Place("Root", root, "folder"),))],
+    )
+    assert "/ Root" in fm.app.screen(), "ASCII fallback by default"
 
     _enable_nerd_fonts(fm)
-    fm.step(_key_event(DOWN_KEY))  # moves the cursor onto "alpha"; also forces a repaint
+    fm.step(_key_event(DOWN_KEY))  # forces a repaint
 
-    assert f"{_CODICON_FOLDER_GLYPH} {fm.cursor.name}" in fm.app.screen()
+    assert f"{_CODICON_FOLDER_GLYPH} Root" in fm.app.screen()
 
 
 def test_details_row_shows_the_file_codicon_once_nerd_fonts_are_on(tmp_path):

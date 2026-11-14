@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from quadraui_files import FileManager
+from quadraui_files.app import Place, PlaceSection
 
 
 class _NoDesktopActions:
@@ -38,6 +39,10 @@ def _no_desktop_windows(monkeypatch):
     real_init = FileManager.__init__
 
     def init(self, *args, **kwargs):
+        # The real sidebar lists this machine's own places (Finder's
+        # Favorites, mounted volumes...); tests get an empty one unless they
+        # pass `sections`, so screens don't depend on the host.
+        kwargs.setdefault("sections", [])
         real_init(self, *args, **kwargs)
         self.actions = _NoDesktopActions(self.actions)
 
@@ -57,6 +62,22 @@ def sample_tree(tmp_path: Path) -> Path:
     """A root with two subfolders (alpha, beta), a file at root, and a file
     inside alpha."""
     return _make_tree(tmp_path)
+
+
+def sample_sections(root: Path) -> list[PlaceSection]:
+    """A fixed two-place sidebar over `sample_tree`."""
+    return [
+        PlaceSection(
+            "Favorites",
+            (Place("Root", root, "folder"), Place("Alpha", root / "alpha", "folder")),
+        )
+    ]
+
+
+@pytest.fixture
+def sidebar_fm(sample_tree: Path) -> FileManager:
+    """A `FileManager` on `sample_tree` with `sample_sections` in its sidebar."""
+    return FileManager(sample_tree, width=120, height=30, sections=sample_sections(sample_tree))
 
 
 NO_MODS = {"shift": False, "ctrl": False, "alt": False, "cmd": False}

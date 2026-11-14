@@ -50,13 +50,13 @@ def test_toolbar_delete_click_opens_the_danger_confirm_dialog(sample_tree):
     (see `_toolbar`'s own doc), and a click on it must reach the same
     confirm dialog `Delete`/the Menu action does (see `_request_delete`'s
     own doc)."""
-    fm = FileManager(sample_tree, width=160, height=20)
-    fm.step(_key_event(DOWN_KEY))  # off the root -- root can't be trashed
+    fm = FileManager(sample_tree, width=220, height=20)  # wide enough for the whole toolbar
+    fm.step(_key_event(DOWN_KEY))  # select "alpha" -- nothing selected means nothing to trash
 
     x, y = _find_row(fm, "Move to Trash (Del)")
     _click(fm, x, y)
 
-    assert fm._delete_target is fm.cursor, (
+    assert fm._delete_target is fm.selected_file and fm.selected_file.name == "alpha", (
         "a click on the toolbar's Move to Trash button must put up the "
         "same confirm dialog `Delete`/`_request_delete` does"
     )

@@ -6,6 +6,10 @@ Python code** runs in the terminal (TUI) and as a **native desktop window** — 
 final `run_*` call differs. The flagship "prototype in your terminal, ship a native GUI
 for free" demo. Seeded from quadraui-py's `examples/file_manager.py`.
 
+**Read [`docs/VISION.md`](docs/VISION.md) first** -- what this app is for (a
+quadraui test bed), the Finder/Explorer-style UX it's aiming at, and how gaps
+get filed.
+
 ## Architecture
 
 - `src/quadraui_files/app.py` — the whole app: a `FileManager` that owns a `QuiApp`, a
@@ -53,5 +57,6 @@ core smoke set (`tests/test_smoke.py`) green.
 ## Conventions
 
 - Python 3.10+, type hints.
-- `gh` is on the deny-list — the coordinator owns GitHub; use plain `git`.
+- This repo is worked interactively, not through the coord pipeline: file
+  quadraui gaps on JDonaghy/quadraui and app follow-ups on this repo's issues.
 - Commit and push before your final message.
