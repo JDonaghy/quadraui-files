@@ -13,3 +13,4 @@ build/
 .pytest_cache/
 .DS_Store
 target/
+graphify-out/
