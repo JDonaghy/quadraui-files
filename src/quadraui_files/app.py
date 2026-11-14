@@ -128,6 +128,7 @@ from __future__ import annotations
 import math
 import mimetypes
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -136,6 +137,7 @@ import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from stat import filemode
 
 from quadraui import InternalError, QuadrauiError, QuiApp
 from quadraui.app.hot_reload import (
@@ -230,6 +232,45 @@ def _invalid_rename_name(new_name: str) -> str | None:
     if new_name.startswith("."):
         return "hidden names aren't shown here"
     return None
+
+
+def _unique_sibling_name(parent: Node, base: str, suffix: str = "") -> str:
+    """The first of `base+suffix`, `base 2+suffix`, `base 3+suffix`, ... that
+    isn't already a name in `parent.children` (case-insensitive, matching a
+    case-insensitive filesystem's own collision rule -- same check `_rename`
+    makes). Used for New Folder's "untitled folder"/"untitled folder 2"/...
+    and Duplicate/Paste's "name copy"/"name copy 2"/..., Finder's own
+    numbering for both."""
+    existing = {c.name.lower() for c in (parent.children or ())}
+    name = f"{base}{suffix}"
+    if name.lower() not in existing:
+        return name
+    n = 2
+    while True:
+        name = f"{base} {n}{suffix}"
+        if name.lower() not in existing:
+            return name
+        n += 1
+
+
+def _copy_entry_to(source: Node, new_path: Path, parent: Node) -> Node:
+    """Copy `source`'s file (or, recursively, its whole directory tree) onto
+    `new_path` and return the `Node` for it, parented under `parent` --
+    shared by `_duplicate` (same folder) and `_paste` (possibly a different
+    one). Raises `OSError` on failure; the caller reports it as a message,
+    same as `_rename`'s own disk-op failures."""
+    if source.is_dir:
+        shutil.copytree(source.path, new_path)
+    else:
+        shutil.copy2(source.path, new_path)
+    return Node(
+        name=new_path.name,
+        path=new_path,
+        is_dir=source.is_dir,
+        size_bytes=None if source.is_dir else _safe_size(new_path),
+        mtime=_safe_mtime(new_path),
+        parent=parent,
+    )
 
 
 def load_children(node: Node) -> None:
@@ -1534,6 +1575,22 @@ ACCELERATORS = [
     {"id": "fm:accel:delete", "binding": {"Literal": "Delete"}, "scope": "Global", "label": "Move to Trash"},
     {"id": "fm:accel:search", "binding": {"Literal": "ctrl+f"}, "scope": "Global", "label": "Search"},
     {"id": "fm:accel:search_cmd", "binding": {"Literal": "cmd+f"}, "scope": "Global", "label": "Search"},
+    # Finder's own New Folder chord is cmd+shift+n; Explorer's and
+    # Nautilus's is ctrl+shift+n -- both registered, same dual-binding
+    # pattern as search above, so either host's muscle memory works.
+    {"id": "fm:accel:new_folder", "binding": {"Literal": "ctrl+shift+n"}, "scope": "Global", "label": "New Folder"},
+    {"id": "fm:accel:new_folder_cmd", "binding": {"Literal": "cmd+shift+n"}, "scope": "Global", "label": "New Folder"},
+    # Duplicate is cmd+d in Finder; Explorer/Nautilus have no equivalent
+    # chord to mirror (ctrl+d means something else in both), so this one
+    # stays mac-only for now -- still reachable everywhere from the
+    # context menu.
+    {"id": "fm:accel:duplicate", "binding": {"Literal": "cmd+d"}, "scope": "Global", "label": "Duplicate"},
+    {"id": "fm:accel:copy", "binding": {"Literal": "ctrl+c"}, "scope": "Global", "label": "Copy"},
+    {"id": "fm:accel:copy_cmd", "binding": {"Literal": "cmd+c"}, "scope": "Global", "label": "Copy"},
+    {"id": "fm:accel:paste", "binding": {"Literal": "ctrl+v"}, "scope": "Global", "label": "Paste"},
+    {"id": "fm:accel:paste_cmd", "binding": {"Literal": "cmd+v"}, "scope": "Global", "label": "Paste"},
+    {"id": "fm:accel:get_info", "binding": {"Literal": "ctrl+i"}, "scope": "Global", "label": "Get Info"},
+    {"id": "fm:accel:get_info_cmd", "binding": {"Literal": "cmd+i"}, "scope": "Global", "label": "Get Info"},
 ]
 
 
@@ -1851,6 +1908,13 @@ class FileManager:
         # closes it knows what to act on.
         self._delete_target: Node | None = None
         self._menu_target: Node | None = None
+        # Copy/Paste clipboard: an in-app buffer, not the OS clipboard --
+        # `QuiAppActions` has `clipboard_read_file_list` but no matching
+        # writer (JDonaghy/quadraui#2553), so a real Finder-interoperable
+        # Copy isn't possible yet. Holds the node Copy last captured; Paste
+        # reads it without clearing it, so pasting into several folders in a
+        # row (like a real clipboard) works.
+        self._clipboard: Node | None = None
         # The one trashed node an `Undo` click may put back, consumed on use:
         # a second restore of the same path has nothing left to find and fails
         # inside the event pump, where this app cannot catch it.
@@ -2702,10 +2766,13 @@ class FileManager:
         self.actions.reveal_in_file_manager(str(node.path))
 
     def _delete_candidate(self) -> Node | None:
-        """What Delete / the `Menu` key / F2 act on: the row selected in the
-        current listing -- by a click, Up/Down, or an activation -- if it's
-        still listed there. Like Finder/Explorer, nothing selected means
-        nothing to act on: the folder being browsed is never the target."""
+        """What every single-selection keyboard action (Delete, the `Menu`
+        key, F2, and the Duplicate/Copy/Get Info accelerators) acts on: the
+        row selected in the current listing -- by a click, Up/Down, or an
+        activation -- if it's still listed there. Like Finder/Explorer,
+        nothing selected means nothing to act on: the folder being browsed
+        is never the target (contrast New Folder/Paste, which always act on
+        it deliberately -- see `_new_folder`/`_paste`)."""
         if self.selected_file in (self.cursor.children or ()):
             return self.selected_file
         return None
@@ -2867,6 +2934,139 @@ class FileManager:
             parent.children.sort(key=_sort_key)
         self.message = f"renamed to {new_name}"
 
+    def _new_folder(self) -> None:
+        """New Folder: create "untitled folder" (or the first numbered
+        variant that doesn't collide) inside the folder currently browsed
+        -- always `self.cursor`, never whatever row happens to be selected,
+        the same way Finder's New Folder always lands beside what you're
+        looking at, not beside what you clicked. Selects it and opens an
+        inline rename immediately, same as a real Finder/Explorer/Nautilus
+        new folder drops you straight into an editable name."""
+        parent = self.cursor
+        if parent.load_error:
+            self.message = f"can't create a folder here: {parent.load_error_reason or 'unreadable'}"
+            return
+        name = _unique_sibling_name(parent, "untitled folder")
+        new_path = parent.path / name
+        try:
+            new_path.mkdir()
+        except OSError as exc:
+            self.message = f"couldn't create folder: {exc}"
+            return
+        new_node = Node(name=name, path=new_path, is_dir=True, mtime=_safe_mtime(new_path), parent=parent)
+        self._add_child(parent, new_node)
+        self._set_selected_file(new_node)
+        self._start_rename(new_node)
+
+    def _duplicate(self, node: Node | None) -> None:
+        """Duplicate: a real on-disk copy beside the original, named
+        Finder-style ("name copy", then "name copy 2", ...), selected once
+        it lands. A no-op (with a message) for nothing selected or a
+        protected node -- same guard `_rename`/`_trash` use."""
+        if node is None:
+            self.message = "select something to duplicate"
+            return
+        if self._protected(node):
+            self.message = f"can't duplicate {node.name or node.path}"
+            return
+        parent = node.parent
+        if parent is None:
+            # Unreachable in practice -- `_protected` above already covers
+            # "no parent" -- but narrows the type for the `parent.path`
+            # below rather than asserting it.
+            self.message = f"can't duplicate {node.name or node.path}"
+            return
+        stem = node.name if node.is_dir else node.path.stem
+        suffix = "" if node.is_dir else node.path.suffix
+        new_name = _unique_sibling_name(parent, f"{stem} copy", suffix)
+        try:
+            new_node = _copy_entry_to(node, parent.path / new_name, parent)
+        except OSError as exc:
+            self.message = f"duplicate failed: {exc}"
+            return
+        self._add_child(parent, new_node)
+        self._set_selected_file(new_node)
+        self.message = f"duplicated as {new_node.name}"
+
+    def _copy(self, node: Node | None) -> None:
+        """Copy: remembers `node` in the in-app clipboard (see `__init__`'s
+        own doc on why this isn't the real OS clipboard yet). Doesn't clear
+        on a subsequent Paste, so one Copy can seed several folders."""
+        if node is None:
+            self.message = "select something to copy"
+            return
+        self._clipboard = node
+        self.message = f"copied {node.name}"
+
+    def _paste(self) -> None:
+        """Paste: a real on-disk copy of whatever Copy last captured, into
+        the folder currently browsed. Keeps the original name unless that
+        would collide (pasting back into its own folder always does),
+        falling back to Duplicate's own "name copy" numbering in that case
+        -- the same choice Finder makes."""
+        node = self._clipboard
+        if node is None:
+            self.message = "nothing to paste"
+            return
+        if not node.path.exists():
+            self.message = f"{node.name} is no longer there"
+            self._clipboard = None
+            return
+        parent = self.cursor
+        if parent.load_error:
+            self.message = f"can't paste here: {parent.load_error_reason or 'unreadable'}"
+            return
+        if (parent.path / node.name).exists():
+            stem = node.name if node.is_dir else node.path.stem
+            suffix = "" if node.is_dir else node.path.suffix
+            new_name = _unique_sibling_name(parent, f"{stem} copy", suffix)
+        else:
+            new_name = node.name
+        try:
+            new_node = _copy_entry_to(node, parent.path / new_name, parent)
+        except OSError as exc:
+            self.message = f"paste failed: {exc}"
+            return
+        self._add_child(parent, new_node)
+        self._set_selected_file(new_node)
+        self.message = f"pasted {new_node.name}"
+
+    def _request_get_info(self, node: Node | None) -> None:
+        """Get Info: a modal dialog (real Finder's own is a floating
+        non-modal panel -- `QuiAppActions.show_float` could get closer, but
+        that's a separate, bigger seam than this pass; see VISION.md's
+        backlog) with Kind/Size-or-item-count/Modified/Created/Where/
+        Permissions, reusing the exact vocabulary the details grid's own
+        Kind column and `_human_mtime` already use elsewhere."""
+        if node is None:
+            self.message = "select something to get info about"
+            return
+        try:
+            st = node.path.stat()
+        except OSError as exc:
+            self.message = f"can't get info: {exc}"
+            return
+        if node.is_dir:
+            ensure_loaded(node)
+            size_line = f"Contains: {len(node.children or [])} items"
+        else:
+            size_line = f"Size: {_human_size(st.st_size)}"
+        where = node.parent.path if node.parent is not None else node.path.parent
+        created = getattr(st, "st_birthtime", st.st_ctime)
+        lines = [
+            f"Kind: {_human_kind(node)}",
+            size_line,
+            f"Modified: {_human_mtime(st.st_mtime)}",
+            f"Created: {_human_mtime(created)}",
+            f"Where: {where}",
+            f"Permissions: {filemode(st.st_mode)}",
+        ]
+        self.actions.show_message_dialog(
+            title=node.name,
+            body="\n".join(lines),
+            buttons=[{"id": "ok", "label": "OK", "is_default": True, "is_cancel": True}],
+        )
+
     def _request_delete(self, node: Node | None) -> None:
         """Put up a Cancel/Delete confirm dialog for `node`."""
         if node is None:
@@ -2918,18 +3118,34 @@ class FileManager:
             self._trash(target)
 
     def _request_context_menu(self, node: Node | None) -> None:
-        """Put up a context menu (Open / Reveal in file manager / Move to
-        Trash) for `node` -- the folder being browsed when nothing is
-        selected, like a right-click on a listing's empty space."""
+        """Put up a context menu for `node` -- the folder being browsed
+        when nothing is selected, like a right-click on a listing's empty
+        space (see `_rename`/`_duplicate`/.../`_trash`'s own doc on what
+        each item does). "New Folder" and "Paste" are the two exceptions:
+        they always act on `self.cursor`, not on whatever this menu's own
+        target is, the same way Finder's New Folder/Paste always land in
+        the folder you're looking at, never relative to a selected row --
+        `_on_menu_item` reaches `_new_folder`/`_paste` themselves for that
+        reason, instead of passing them `self._menu_target`. "Paste" only
+        appears once a `_copy` has actually put something in the
+        clipboard, same as Finder graying it out (here: leaving it off)
+        otherwise. Item order keeps "Open"/"Reveal" first, same positions
+        `tests/test_actions.py` already pins down, with the newer items
+        after them and "Move to Trash" still last."""
         self._menu_target = node or self.cursor
-        self.actions.show_context_menu(
-            items=[
-                {"id": "open", "label": _styled_text("Open")},
-                {"id": "reveal", "label": _styled_text("Reveal")},
-                {"id": "trash", "label": _styled_text("Move to Trash")},
-            ],
-            position=(2, 2),
-        )
+        items = [
+            {"id": "open", "label": _styled_text("Open")},
+            {"id": "reveal", "label": _styled_text("Reveal")},
+            {"id": "get_info", "label": _styled_text("Get Info")},
+            {"id": "rename", "label": _styled_text("Rename")},
+            {"id": "duplicate", "label": _styled_text("Duplicate")},
+            {"id": "copy", "label": _styled_text("Copy")},
+            {"id": "new_folder", "label": _styled_text("New Folder")},
+        ]
+        if self._clipboard is not None:
+            items.append({"id": "paste", "label": _styled_text("Paste")})
+        items.append({"id": "trash", "label": _styled_text("Move to Trash")})
+        self.actions.show_context_menu(items=items, position=(2, 2))
 
     def _on_menu_item(self, item_id: str) -> None:
         """A `ContextMenuItemActivated` event: a tray-menu item (C13) fires
@@ -2961,6 +3177,18 @@ class FileManager:
             self._open_with_os(node)
         elif item_id == "reveal":
             self._reveal_in_os(node)
+        elif item_id == "get_info":
+            self._request_get_info(node)
+        elif item_id == "rename":
+            self._start_rename(node)
+        elif item_id == "duplicate":
+            self._duplicate(node)
+        elif item_id == "copy":
+            self._copy(node)
+        elif item_id == "new_folder":
+            self._new_folder()
+        elif item_id == "paste":
+            self._paste()
         elif item_id == "trash":
             self._request_delete(node)
 
@@ -3048,6 +3276,19 @@ class FileManager:
             return
         if node not in parent.children:
             parent.children = sorted([*parent.children, node], key=_sort_key)
+
+    def _add_child(self, parent: Node, child: Node) -> None:
+        """Insert a freshly created/copied `child` into `parent.children` in
+        display order -- `_new_folder`/`_duplicate`/`_paste`'s shared tail.
+        Unlike `_remember` (a restore, which has nothing to do if `parent`
+        was never loaded), initializes an unset `children` to `[]` rather
+        than no-op-ing: `parent` here is always a folder the app just built
+        a brand new node for, so dropping it silently would be a bug, not a
+        correct no-op."""
+        if parent.children is None:
+            parent.children = []
+        if child not in parent.children:
+            parent.children = sorted([*parent.children, child], key=_sort_key)
 
     def step(self, event: dict) -> None:
         """Push `event` and dispatch it. `QuiApp.step` also drains the
@@ -3864,6 +4105,16 @@ class FileManager:
             self._request_delete(self._delete_candidate())
         elif accel_id in ("fm:accel:search", "fm:accel:search_cmd"):
             self._start_filter()
+        elif accel_id in ("fm:accel:new_folder", "fm:accel:new_folder_cmd"):
+            self._new_folder()
+        elif accel_id == "fm:accel:duplicate":
+            self._duplicate(self._delete_candidate())
+        elif accel_id in ("fm:accel:copy", "fm:accel:copy_cmd"):
+            self._copy(self._delete_candidate())
+        elif accel_id in ("fm:accel:paste", "fm:accel:paste_cmd"):
+            self._paste()
+        elif accel_id in ("fm:accel:get_info", "fm:accel:get_info_cmd"):
+            self._request_get_info(self._delete_candidate())
 
     def _on_toolbar_button(self, button_id: str) -> None:
         """A real `Toolbar`/`ButtonClicked` event -- a click on one of
