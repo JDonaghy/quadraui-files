@@ -1,4 +1,5 @@
-"""Console entry point: `quadraui-files [PATH] [--tui|--native|--dump|--reload]`.
+"""Console entry point: `quadraui-files [PATH] [--tui|--native|--dump|--reload]
+[--nerd-fonts|--no-nerd-fonts]`.
 
 The only platform-specific line is the `run_*` call — the same `FileManager`
 descriptor code drives every backend.
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from quadraui import QuiApp
 
-from .app import FileManager, _NATIVE_BACKEND, _Quit, _dump_steps, _run_headless, _wrap_quit
+from .app import FileManager, _NATIVE_BACKEND, detect_nerd_fonts, _Quit, _dump_steps, _run_headless, _wrap_quit
 
 _NATIVE_FEATURE = {"darwin": "macos", "win32": "win"}.get(sys.platform, "gtk")
 
@@ -67,6 +68,15 @@ def main(argv: list[str] | None = None) -> int:
         fm.enable_hot_reload()
 
     if "--tui" in flags:
+        # Nerd Font glyphs if the terminal can paint them (`--nerd-fonts`/
+        # `--no-nerd-fonts` to force it; see `detect_nerd_fonts`).
+        if "--nerd-fonts" in flags:
+            nerd = True
+        elif "--no-nerd-fonts" in flags:
+            nerd = False
+        else:
+            nerd = detect_nerd_fonts()
+        fm.set_nerd_fonts(nerd)
         _wrap_quit(fm)  # real terminal: raw mode, live redraw on key events
         fm.start_live_title()
         try:

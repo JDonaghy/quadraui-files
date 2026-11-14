@@ -129,6 +129,7 @@ import math
 import mimetypes
 import os
 import struct
+import subprocess
 import sys
 import threading
 import zlib
@@ -418,7 +419,10 @@ class Place:
     label: str
     path: Path
     codicon: str
-    fallback: str = "/"
+    # Painted instead of the codicon when nerd fonts are off (the TUI's
+    # default): a single-width symbol any terminal font has, so places stay
+    # distinguishable at a glance without one.
+    fallback: str = "▪"
 
 
 @dataclass(frozen=True)
@@ -453,11 +457,11 @@ def _mac_volumes() -> list[Place]:
         except OSError:
             continue
         if is_boot:
-            boot.append(Place(entry.name, Path("/"), "root-folder"))
+            boot.append(Place(entry.name, Path("/"), "root-folder", "▣"))
         else:
-            volumes.append(Place(entry.name, entry, "database"))
+            volumes.append(Place(entry.name, entry, "database", "▤"))
     if not boot:
-        boot.append(Place("Macintosh HD", Path("/"), "root-folder"))
+        boot.append(Place("Macintosh HD", Path("/"), "root-folder", "▣"))
     return boot + volumes
 
 
@@ -468,17 +472,17 @@ def _mac_sections(home: Path) -> list[PlaceSection]:
         PlaceSection(
             "Favorites",
             _existing([
-                Place("Applications", Path("/Applications"), "package"),
-                Place("Desktop", home / "Desktop", "layout"),
-                Place("Documents", home / "Documents", "files"),
-                Place("Downloads", home / "Downloads", "folder"),
-                Place(home.name, home, "account"),
+                Place("Applications", Path("/Applications"), "package", "◆"),
+                Place("Desktop", home / "Desktop", "layout", "▭"),
+                Place("Documents", home / "Documents", "files", "≡"),
+                Place("Downloads", home / "Downloads", "folder", "↓"),
+                Place(home.name, home, "account", "⌂"),
             ]),
         ),
         PlaceSection(
             "iCloud",
             _existing([
-                Place("iCloud Drive", home / "Library" / "Mobile Documents" / "com~apple~CloudDocs", "sync"),
+                Place("iCloud Drive", home / "Library" / "Mobile Documents" / "com~apple~CloudDocs", "sync", "○"),
             ]),
         ),
         PlaceSection("Locations", _existing(_mac_volumes())),
@@ -493,18 +497,18 @@ def _windows_sections(home: Path) -> list[PlaceSection]:
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         root = Path(f"{letter}:\\")
         if root.exists():
-            drives.append(Place(f"Local Disk ({letter}:)" if letter == "C" else f"{letter}:", root, "database"))
+            drives.append(Place(f"Local Disk ({letter}:)" if letter == "C" else f"{letter}:", root, "database", "▤"))
     sections = [
         PlaceSection(
             "Quick access",
             _existing([
-                Place("Home", home, "account"),
-                Place("Desktop", home / "Desktop", "layout"),
-                Place("Downloads", home / "Downloads", "folder"),
-                Place("Documents", home / "Documents", "files"),
-                Place("Pictures", home / "Pictures", "file-media"),
-                Place("Music", home / "Music", "file-media"),
-                Place("Videos", home / "Videos", "file-media"),
+                Place("Home", home, "account", "⌂"),
+                Place("Desktop", home / "Desktop", "layout", "▭"),
+                Place("Downloads", home / "Downloads", "folder", "↓"),
+                Place("Documents", home / "Documents", "files", "≡"),
+                Place("Pictures", home / "Pictures", "file-media", "▨"),
+                Place("Music", home / "Music", "file-media", "♪"),
+                Place("Videos", home / "Videos", "file-media", "►"),
             ]),
         ),
         PlaceSection("This PC", tuple(drives)),
@@ -516,29 +520,64 @@ def _linux_sections(home: Path) -> list[PlaceSection]:
     """Nautilus's sidebar: the XDG user folders, then the computer itself
     and whatever removable media is mounted for this user."""
     user = home.name
-    mounts: list[Place] = [Place("Computer", Path("/"), "root-folder")]
+    mounts: list[Place] = [Place("Computer", Path("/"), "root-folder", "▣")]
     for base in (Path("/media") / user, Path("/run/media") / user):
         try:
             entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
         except OSError:
             continue
-        mounts.extend(Place(e.name, e, "database") for e in entries if e.is_dir())
+        mounts.extend(Place(e.name, e, "database", "▤") for e in entries if e.is_dir())
     sections = [
         PlaceSection(
             "Places",
             _existing([
-                Place("Home", home, "account"),
-                Place("Desktop", home / "Desktop", "layout"),
-                Place("Documents", home / "Documents", "files"),
-                Place("Downloads", home / "Downloads", "folder"),
-                Place("Music", home / "Music", "file-media"),
-                Place("Pictures", home / "Pictures", "file-media"),
-                Place("Videos", home / "Videos", "file-media"),
+                Place("Home", home, "account", "⌂"),
+                Place("Desktop", home / "Desktop", "layout", "▭"),
+                Place("Documents", home / "Documents", "files", "≡"),
+                Place("Downloads", home / "Downloads", "folder", "↓"),
+                Place("Music", home / "Music", "file-media", "♪"),
+                Place("Pictures", home / "Pictures", "file-media", "▨"),
+                Place("Videos", home / "Videos", "file-media", "►"),
             ]),
         ),
         PlaceSection("Devices", _existing(mounts)),
     ]
     return [s for s in sections if s.places]
+
+
+# Terminals that ship the Nerd Font symbols built in, so codicon glyphs paint
+# whatever font the user picked. Matched as substrings of `$TERM_PROGRAM`/
+# `$TERM`, or of tmux's `client_termname`/`client_termtype` when running
+# inside tmux (which hides the outer terminal from the environment).
+_NERD_FONT_TERMINALS = ("ghostty", "kitty", "wezterm")
+NERD_FONTS_ENV = "QUADRAUI_FILES_NERD_FONTS"
+
+
+def detect_nerd_fonts(env: dict[str, str] | None = None) -> bool:
+    """Whether this terminal can paint Nerd Font glyphs. A terminal can't
+    report its font, so this is a best guess: `$QUADRAUI_FILES_NERD_FONTS`
+    (`1`/`0`) decides outright; otherwise yes for terminals that bundle the
+    symbols (Ghostty, kitty, WezTerm) -- seen through tmux too -- and no
+    otherwise, which keeps the plain-Unicode fallbacks."""
+    env = dict(os.environ) if env is None else env
+    override = env.get(NERD_FONTS_ENV)
+    if override is not None:
+        return override.strip().lower() not in ("", "0", "false", "no", "off")
+    if env.get("GHOSTTY_RESOURCES_DIR") or env.get("KITTY_WINDOW_ID") or env.get("WEZTERM_EXECUTABLE"):
+        return True
+    names = [env.get("TERM_PROGRAM", ""), env.get("TERM", "")]
+    if env.get("TMUX"):
+        try:
+            names.append(
+                subprocess.run(
+                    ["tmux", "display", "-p", "#{client_termname} #{client_termtype}"],
+                    capture_output=True, text=True, timeout=1,
+                ).stdout
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    blob = " ".join(names).lower()
+    return any(name in blob for name in _NERD_FONT_TERMINALS)
 
 
 def default_sections(platform: str | None = None, home: Path | None = None) -> list[PlaceSection]:
@@ -1999,6 +2038,14 @@ class FileManager:
         instead."""
         self.app.set_theme(_theme_overrides(dark))
         self._status_fg, self._status_bg, self._status_accent = _status_colors(dark)
+
+    def set_nerd_fonts(self, enabled: bool) -> None:
+        """Paint codicon glyphs (sidebar places, toolbar, row markers) instead
+        of their plain fallbacks. Top-level only, like `_set_theme` -- call
+        before `run_tui()`; quadraui replays it onto the real terminal
+        backend. Native backends bundle the codicon font and need no call."""
+        self.app.set_nerd_fonts(enabled)
+        self._nerd_fonts_enabled = self.app.nerd_fonts_enabled()
 
     @property
     def window_title(self) -> str:

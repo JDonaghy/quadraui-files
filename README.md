@@ -105,6 +105,12 @@ key focus (the list by default; Tab switches). In the list, Right opens the sele
 folder and Left goes up, selecting the folder you came from. With no PATH the app opens
 on the home folder. See [`docs/VISION.md`](docs/VISION.md) for the intended UX.
 
+In the TUI, codicon glyphs (sidebar places, toolbar, grid markers) need Nerd Font
+symbols. `--tui` turns them on automatically in terminals that bundle them (Ghostty,
+kitty, WezTerm; detected through tmux too); force it with `--nerd-fonts` /
+`--no-nerd-fonts` or `QUADRAUI_FILES_NERD_FONTS=1`/`0`. Without them, sidebar places
+show plain-Unicode symbols (`⌂` home, `↓` Downloads, `▤` volumes...).
+
 With a Nerd Font available, each grid row leads its name with a type-specific
 codicon marker (media, PDF, zip, JSON, Markdown, source code, folder), matching
 the Kind column.

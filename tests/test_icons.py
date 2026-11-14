@@ -40,7 +40,7 @@ def test_sidebar_place_row_shows_its_codicon_once_nerd_fonts_are_on(tmp_path):
         root, width=120, height=20,
         sections=[PlaceSection("Favorites", (Place("Root", root, "folder"),))],
     )
-    assert "/ Root" in fm.app.screen(), "ASCII fallback by default"
+    assert "▪ Root" in fm.app.screen(), "plain-Unicode fallback by default"
 
     _enable_nerd_fonts(fm)
     fm.step(_key_event(DOWN_KEY))  # forces a repaint
