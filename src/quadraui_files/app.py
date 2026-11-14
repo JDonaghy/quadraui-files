@@ -5,29 +5,27 @@ Windows -- only the final run call differs per platform.
 Layout (the `render` callback returns a *layout tree*):
 
     split (vertical: chrome + body stacked over a status bar)
-    ├─ first  : sidebar_panel
-    │            ├─ toolbar : real clickable actions (reserved top slot)
-    │            └─ content : split (resizable divider, draggable)
-    │                          ├─ first  : the PLACES sidebar -- Finder's
-    │                          │           Favorites/Locations on macOS,
-    │                          │           Explorer's Quick access/This PC
-    │                          │           on Windows, Nautilus's places on
-    │                          │           Linux -- collapsible sections
-    │                          └─ second : split (resizable divider, draggable)
-    │                                      ├─ first  : tabs, one per browsing
-    │                                      │           location; each tab is an
-    │                                      │           address bar (clickable
-    │                                      │           breadcrumbs) over a
-    │                                      │           data_table of that
-    │                                      │           folder's contents
-    │                                      └─ second : a split (header over
-    │                                                  content) -- a one-line
-    │                                                  header naming/sizing
-    │                                                  the last file selected
-    │                                                  in a details table,
-    │                                                  over a read-only
-    │                                                  preview of it; `p`
-    │                                                  hides the whole thing
+    ├─ first  : split (resizable divider, draggable)
+    │            ├─ first  : the PLACES sidebar -- Finder's
+    │            │           Favorites/Locations on macOS,
+    │            │           Explorer's Quick access/This PC
+    │            │           on Windows, Nautilus's places on
+    │            │           Linux -- collapsible sections
+    │            └─ second : split (resizable divider, draggable)
+    │                         ├─ first  : tabs, one per browsing
+    │                         │           location; each tab is an
+    │                         │           address bar (clickable
+    │                         │           breadcrumbs) over a
+    │                         │           data_table of that
+    │                         │           folder's contents
+    │                         └─ second : a split (header over
+    │                                     content) -- a one-line
+    │                                     header naming/sizing
+    │                                     the last file selected
+    │                                     in a details table,
+    │                                     over a read-only
+    │                                     preview of it; `p`
+    │                                     hides the whole thing
     └─ second : a live status bar (current folder, item count, open tabs)
 
 The sidebar is navigation only, like Finder's: picking a place shows it in
@@ -65,8 +63,17 @@ key focus -- the file list (the default), or the sidebar:
   r            reload the current folder from disk
   Delete       trash the selected row -- after a Cancel/Delete confirm
                dialog -- and show a toast whose Undo button puts it back
-  Menu         open a context menu (Open / Reveal in file manager / Move to
-               Trash) for the selected row
+  Menu, Shift+F10   open a context menu (Open / Reveal / Get Info / Rename /
+               Duplicate / Copy / New Folder / Paste once something has
+               been Copied / Move to Trash) for the selected row -- New
+               Folder and Paste always act on the folder being browsed,
+               never on the selection (see `_request_context_menu`'s doc)
+  ⌘⇧N / ^⇧N    new folder in the browsed folder, straight into an inline
+               rename, like Finder/Explorer/Nautilus
+  ⌘D           duplicate the selected row ("name copy", "name copy 2", ...)
+  ⌘C / ^C      copy the selected row to this app's own clipboard
+  ⌘V / ^V      paste into the folder being browsed
+  ⌘I / ^I      Get Info for the selected row
   /            open the bottom filter box; typing narrows every open
                details table live, Enter closes the box (filter stays
                applied), Esc closes it and clears the filter
@@ -93,7 +100,9 @@ key focus -- the file list (the default), or the sidebar:
 A right-click would be the natural way to open the context menu, but the
 installed quadraui's `Tree`/`DataTable` row-click events don't report which
 mouse button triggered them, so a right click on a row can't be told apart
-from a left one here -- `Menu` is the keyboard stand-in.
+from a left one here (JDonaghy/quadraui#2555) -- `Menu`/`Shift+F10` are the
+keyboard stand-ins, and until that's fixed upstream there is no mouse-only
+path to the context menu in the TUI.
 
 Hot reload: run with `--reload` and the app re-imports its own module whenever
 the source file changes, keeping the running session's state (open tabs,
@@ -1116,10 +1125,8 @@ def _preview_header_parts(node: Node | None) -> tuple[str, str, str]:
 #
 # `padding`/`gap` are wire keys siblings of a node's own key (`{"split":
 # {...}, "padding": 8.0, "gap": 8.0}`, not nested inside it) on a `row`/
-# `column`/`split`/`tabs`/`panel` node -- `sidebar_panel` has no support for
-# either and raises a decode error naming the key if given one (hence
-# padding the `sidebar_panel`'s own *content* split below, never the panel
-# itself). Every value is "surface-native pixels" (`quadraui_binding_core
+# `column`/`split`/`tabs`/`panel` node. Every value is "surface-native
+# pixels" (`quadraui_binding_core
 # ::layout::Spacing`'s own doc): rounded up to a whole pixel on a real
 # pixel backend (GTK/macOS/Win, a no-op for the whole-pixel values this app
 # uses), and rounded up to whole terminal cells on the TUI, against the
@@ -1160,298 +1167,8 @@ def _quantise_rows(px: float, line_height: float) -> float:
     return math.ceil(px / _NOMINAL_CELL_PX_HEIGHT)
 
 
-# --- chrome: toolbar band + status bar ---------------------------------------
+# --- chrome: status bar -------------------------------------------------------
 #
-# The toolbar is the body's chrome, carried by a `sidebar_panel` wrapper whose
-# reserved top slot paints it above the content on every backend. Each button
-# below is a real `ToolbarButton::Action`: a click resolves (on every
-# backend, `quadraui-binding-core`'s `SidebarPanelHit::ToolbarButton` hit-test
-# routes it the same way everywhere) to a semantic `Toolbar`/`ButtonClicked`
-# event carrying the clicked button's own `id` -- see `_dispatch`'s `Toolbar`
-# branch and `_on_toolbar_button`, which runs the exact same handler call its
-# keyboard equivalent does. No backend branches on this, but what actually
-# gets painted differs: the TUI's own `Toolbar` painter destructures
-# `Action { label, icon, key_hint, .. }` directly and paints from those
-# legacy fields, taking only `spec.variant` from `spec` for a foreground tint
-# (`quadraui/src/tui/toolbar.rs:228-238`); a native backend
-# (`button::native_surface_paint::paint`, shared by the GTK/macOS/Win
-# backends) paints *only* `spec` once an action has one
-# (`quadraui/src/primitives/toolbar.rs:1209-1224`) -- `label`/`icon`/
-# `key_hint` go unread there. Neither backend paints a real toolkit widget
-# with hover/focus chrome, and neither reads `Action.tooltip`/`spec.tooltip`
-# for its own hover tooltip either (the host-driven path,
-# `BindingHost::drive_hover_tooltip`, only ever resolves text off a `Button`
-# leaf -- see the hover-tooltips section below). This app drives its own
-# tooltip instead, off the hit-tested `MouseEntered`/`MouseLeft` every
-# backend now dispatches for a painted toolbar button
-# (`SidebarPanelHit::ToolbarButton`), same section.
-#
-# `Action.icon` -- unlike `Tree`/`Button` rows' own `icon` field, which takes
-# the `{"codicon": ..., "fallback": ...}` `Icon` wire shape and resolves it
-# on the Rust side -- is a plain string: handing it that dict raises
-# ("invalid type: map, expected a string"). So codicon-vs-ASCII-fallback
-# resolution has to happen here instead, gated on `self._nerd_fonts_enabled`
-# (cached once in `__init__`, exactly like `details_table`'s own marker) --
-# which means `TOOLBAR` has to be built per frame, via `_toolbar` below,
-# rather than live as a module constant the way `TREE_STYLE` does.
-#
-# `spec` (a `ButtonSpec`) is set alongside the legacy fields, not instead of
-# them, and it is no longer a cosmetic no-op on native: `ButtonSpec.icon` is
-# an `Option<Icon>` (the same `{"codicon": ..., "fallback": ...}` wire shape
-# `Tree`/`Button` rows take, resolved Rust-side) and `ButtonSpec.tooltip` is
-# the tooltip string, both set below so a native backend paints a real icon
-# and "Move to Trash"'s `Danger` fill. `ButtonVariant.Icon` itself only drops
-# the bracket/border chrome -- both rasterisers still paint `spec["label"]`
-# right after the icon whenever it's non-empty -- so `_toolbar_action` also
-# empties `spec["label"]` for `Icon`-variant actions to get genuinely
-# icon-only native chrome, rather than `<icon> <label>`. `key_hint` is not
-# painted on native once `spec` is set either way -- upstream's documented
-# "spec is an override" choice -- so the legacy fields above still carry the
-# real icon/tooltip/label for the TUI, which never reads
-# `spec.icon`/`spec.tooltip`/`spec.label`.
-#
-# Most buttons carry `ButtonVariant.Icon` because they have a codicon to
-# show instead of a label; "Move to Trash" is `ButtonVariant.Danger` instead
-# (plus the real TUI tint it already got, and a real label since `Danger`
-# buttons keep their `spec["label"]`), and the Menu button, with no curated
-# codicon to spare, stays `Secondary` (labelled) on every backend.
-#
-# Pure continuous navigation (the old legend's "↑↓ Move") has no single
-# click-sized action to bind, so it is dropped here rather than forced into
-# one; the module doc's own interaction list is still the complete reference
-# for keys that aren't also toolbar buttons.
-
-TOOLBAR_ID = "fm:toolbar"
-
-# Raw PUA codepoints for every codicon `_toolbar` below uses, needed for the
-# same reason `_CODICON_FOLDER_GLYPH`/`_CODICON_FILE_GLYPH` are (see their
-# own doc): `Action.icon` takes a plain string, not an `Icon`-resolving
-# field, so there is no `Icon::resolve` to lean on here either. Picked by
-# hand from `quadraui::codicon_names::NAMES`; `folder`/`file` reuse the
-# constants already picked for the details pane instead of duplicating them.
-_TOOLBAR_CODICON_GLYPHS = {
-    "folder-opened": "",
-    "layout": "",
-    "sync": "",
-    "search": "",
-    "edit": "",
-    "trash": "",
-    "close": "",
-}
-
-
-def _toolbar_action(
-    id_: str,
-    *,
-    label: str,
-    tooltip: str,
-    key_hint: str | None,
-    codicon: str | None,
-    fallback: str,
-    nerd_fonts_enabled: bool,
-    danger: bool = False,
-) -> dict:
-    """One `ToolbarButton::Action` entry for `_toolbar`. `icon`/`label`/
-    `tooltip` are the legacy fields the TUI's own toolbar painter reads (see
-    this section's own doc); `spec` is what a native backend actually paints
-    once it's set, so `spec["icon"]`/`spec["tooltip"]` carry the same icon
-    and tooltip the legacy fields do, not `None`. A native backend paints
-    *only* `spec` for an action that has one, and both rasterisers paint
-    `spec["label"]` right after the icon whenever it is non-empty -- there is
-    no dedicated "icon-only" chrome flag, just an empty label -- so
-    `spec["label"]` is `""` for `ButtonVariant.Icon` actions (set below,
-    deliberately not the same string as the legacy `label` field) to get the
-    icon-only chrome the issue asks for, instead of painting `<icon> <label>`
-    on native."""
-    if danger:
-        variant = "Danger"
-    elif codicon:
-        # `ButtonVariant.Icon` is meant to paint no label chrome (see its
-        # own doc), so it only makes sense paired with an actual icon --
-        # `TOOLBAR_MENU_ID` has none of the curated codicons to spare (no
-        # "more"/"kebab" glyph in `codicon_names::NAMES`), and stays
-        # `Secondary` (labelled) instead of rendering as an empty button.
-        variant = "Icon"
-    else:
-        variant = "Secondary"
-    # `spec["label"]` is empty for `Icon`-variant actions (see this
-    # function's own doc for why) and otherwise matches the legacy `label`.
-    spec = {
-        "label": "" if variant == "Icon" else label,
-        "variant": variant,
-        "icon": {"codicon": codicon, "fallback": fallback} if codicon else None,
-        "tooltip": tooltip,
-        "disabled": False,
-    }
-    if codicon:
-        icon = _TOOLBAR_CODICON_GLYPHS[codicon] if nerd_fonts_enabled else fallback
-    else:
-        icon = None
-    return {
-        "Action": {
-            "id": id_,
-            "label": label,
-            "icon": icon,
-            "key_hint": key_hint,
-            "enabled": True,
-            "is_active": False,
-            "tooltip": tooltip,
-            "spec": spec,
-        }
-    }
-
-
-TOOLBAR_BACK_ID = "fm:tb:back"
-TOOLBAR_FORWARD_ID = "fm:tb:forward"
-TOOLBAR_UP_ID = "fm:tb:up"
-TOOLBAR_OPEN_ID = "fm:tb:open"
-TOOLBAR_PREVIEW_ID = "fm:tb:preview"
-TOOLBAR_REFRESH_ID = "fm:tb:refresh"
-TOOLBAR_DELETE_ID = "fm:tb:delete"
-TOOLBAR_MENU_ID = "fm:tb:menu"
-TOOLBAR_SEARCH_ID = "fm:tb:search"
-TOOLBAR_RENAME_ID = "fm:tb:rename"
-TOOLBAR_QUIT_ID = "fm:tb:quit"
-
-def _toolbar(nerd_fonts_enabled: bool) -> dict:
-    """The `Toolbar` descriptor for `_render`'s `sidebar_panel`. Rebuilt every
-    frame (see `TOOLBAR_ID`'s own doc for why it can't be a module constant
-    the way `TREE_STYLE` is) from `nerd_fonts_enabled` -- `FileManager`'s own
-    one-time-cached read of `QuiApp.nerd_fonts_enabled()`, see `_toolbar_action`'s
-    own doc."""
-    return {
-        "id": TOOLBAR_ID,
-        "buttons": [
-            _toolbar_action(
-                TOOLBAR_BACK_ID,
-                # No arrow glyphs in quadraui's curated codicon subset yet
-                # (nor `chevron-left`), so Back/Forward/Up stay labelled --
-                # JDonaghy/quadraui#2449.
-                label="Back",
-                tooltip="Back to the previous folder in this tab",
-                key_hint="⌫",
-                codicon=None,
-                fallback="<",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_FORWARD_ID,
-                label="Forward",
-                tooltip="Forward to the next folder in this tab",
-                key_hint="]",
-                codicon=None,
-                fallback=">",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_UP_ID,
-                label="Up",
-                tooltip="Up to the parent folder",
-                key_hint="←",
-                codicon=None,
-                fallback="^",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_OPEN_ID,
-                label="Open",
-                tooltip="Open the selection",
-                key_hint="⏎",
-                codicon="folder-opened",
-                fallback="O",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            "Separator",
-            _toolbar_action(
-                TOOLBAR_PREVIEW_ID,
-                label="Preview",
-                tooltip="Toggle the preview pane",
-                key_hint="p",
-                codicon="layout",
-                fallback="P",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_REFRESH_ID,
-                label="Refresh",
-                tooltip="Reload the current folder",
-                key_hint="r",
-                codicon="sync",
-                fallback="R",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_SEARCH_ID,
-                label="Search",
-                tooltip="Filter the open folders",
-                key_hint="/",
-                codicon="search",
-                fallback="/",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_RENAME_ID,
-                label="Rename",
-                tooltip="Rename the selection",
-                key_hint="F2",
-                codicon="edit",
-                fallback="F2",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            _toolbar_action(
-                TOOLBAR_MENU_ID,
-                label="Menu",
-                tooltip="Open the context menu for the selection",
-                # The real key is the keyboard's own Menu/context key (see
-                # `_on_key`'s `"Menu"` branch) -- not a glyph, so this stays
-                # a name like every other non-arrow `key_hint` here
-                # (`"F2"`, `"Del"`) rather than a symbol sitting in the
-                # keystroke slot.
-                key_hint="Menu",
-                codicon=None,
-                fallback="",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            "Separator",
-            _toolbar_action(
-                TOOLBAR_DELETE_ID,
-                label="Move to Trash",
-                tooltip="Move the selection to the Trash",
-                key_hint="Del",
-                codicon="trash",
-                fallback="DEL",
-                danger=True,
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-            "Separator",
-            _toolbar_action(
-                TOOLBAR_QUIT_ID,
-                label="Quit",
-                tooltip="Quit",
-                key_hint="q",
-                codicon="close",
-                fallback="Q",
-                nerd_fonts_enabled=nerd_fonts_enabled,
-            ),
-        ],
-    }
-
-
-# Maps each `_toolbar` action id to its own `tooltip` string, read back
-# from `_toolbar`'s own built descriptor once, at import time, rather than
-# a second hand-copied table -- so the hover handler (this section's own
-# doc) can never drift out of sync with what a click on the same button
-# actually does. Built from `_toolbar(False)`: `nerd_fonts_enabled` only
-# ever changes which icon glyph an action's `Action.icon` carries, never
-# its `tooltip`, so there is no need to rebuild this per-frame from
-# whatever `_nerd_fonts_enabled` a given `FileManager` measured.
-_TOOLBAR_TOOLTIPS: dict[str, str] = {
-    entry["Action"]["id"]: entry["Action"]["tooltip"]
-    for entry in _toolbar(False)["buttons"]
-    if isinstance(entry, dict) and "Action" in entry
-}
-
-
 # `StatusBarSegment` requires explicit fg + bg (unlike the theme-driven
 # `StyledText` spans elsewhere, `set_theme` never touches it) -- so the status
 # bar needs its own light/dark pair, picked by `_apply_system_theme` from the
@@ -1591,21 +1308,25 @@ ACCELERATORS = [
     {"id": "fm:accel:paste_cmd", "binding": {"Literal": "cmd+v"}, "scope": "Global", "label": "Paste"},
     {"id": "fm:accel:get_info", "binding": {"Literal": "ctrl+i"}, "scope": "Global", "label": "Get Info"},
     {"id": "fm:accel:get_info_cmd", "binding": {"Literal": "cmd+i"}, "scope": "Global", "label": "Get Info"},
+    # The standard "no right-click" context-menu chord (Windows/terminal
+    # convention) -- a second keyboard stand-in alongside the dedicated
+    # `Menu` key, which most laptop keyboards (Mac ones included) don't
+    # have at all. See the module doc's own note on why a real right-click
+    # can't do this yet (JDonaghy/quadraui#2555).
+    {"id": "fm:accel:menu", "binding": {"Literal": "shift+F10"}, "scope": "Global", "label": "Menu"},
 ]
 
 
 # --- chrome: hover tooltips ---------------------------------------------------
 #
-# A real pointer-hover tooltip on the toolbar, the tree and the details
-# table, with a delay before it appears and an automatic dismiss both on
-# pointer-leave and after it has sat idle a while -- VS Code's own hover
-# card contract. `InteractionEngine::handle` hit-tests every `MouseMoved`
-# against the painted layout and synthesizes a `MouseEntered`/`MouseLeft`
-# pair around a change, each carrying the hit widget's own id and a `"hit"`
-# detail (`TreeRow{row}`, `DataTableRow{row}`, `SidebarPanelToolbarButton
-# {bar}` -- this app's toolbar is the `sidebar_panel`'s own reserved slot,
-# see that section's doc); see `quadraui-binding-core/src/engine.rs`'s own
-# doc on that synthesis.
+# A real pointer-hover tooltip on the tree and the details table, with a
+# delay before it appears and an automatic dismiss both on pointer-leave and
+# after it has sat idle a while -- VS Code's own hover card contract.
+# `InteractionEngine::handle` hit-tests every `MouseMoved` against the
+# painted layout and synthesizes a `MouseEntered`/`MouseLeft` pair around a
+# change, each carrying the hit widget's own id and a `"hit"` detail
+# (`TreeRow{row}`, `DataTableRow{row}`); see
+# `quadraui-binding-core/src/engine.rs`'s own doc on that synthesis.
 #
 # Neither `Action.tooltip`/`spec.tooltip` nor the host's own
 # `BindingHost::drive_hover_tooltip` cover any of that: the host only ever
@@ -1624,7 +1345,7 @@ ACCELERATORS = [
 # has) can arrange:
 #
 #   * `_on_hover_entered` resolves the hit into a `_hover` target (one of
-#     "toolbar"/"tree"/"details", keyed by action id or row) and arms
+#     "tree"/"details", keyed by row) and arms
 #     `self.waker.post_after(delay_ms, ...)` carrying a generation token
 #     (`_hover_gen`) -- `tooltip_delay_ms` off `QuiApp.style()`, VS Code's
 #     own 500ms if that key is ever absent.
@@ -1671,8 +1392,6 @@ ACCELERATORS = [
 # (`_on_hover_moved` records it) -- this app still has no way to learn a
 # `DataTable`'s own backend-owned scroll offset, but it no longer needs to,
 # since the pointer's own screen position already says where the row is.
-# The toolbar case has no row/button rect to read back either, so it
-# anchors off that same recorded pointer position, one cell wide.
 # `Tooltip::layout` clamps/flips the result to stay inside the viewport
 # regardless, so an off-by-a-cell anchor never overflows or crashes.
 
@@ -2108,7 +1827,7 @@ class FileManager:
         self._status_fg, self._status_bg, self._status_accent = _status_colors(dark)
 
     def set_nerd_fonts(self, enabled: bool) -> None:
-        """Paint codicon glyphs (sidebar places, toolbar, row markers) instead
+        """Paint codicon glyphs (sidebar places, row markers) instead
         of their plain fallbacks. Top-level only, like `_set_theme` -- call
         before `run_tui()`; quadraui replays it onto the real terminal
         backend. Native backends bundle the codicon font and need no call."""
@@ -2307,9 +2026,9 @@ class FileManager:
 
     def _tree_capacity(self) -> int:
         """Painted rows that fit in the body's row band: the app's measured
-        viewport height less the three chrome rows above/below it -- the
-        toolbar row, the outer split's divider, and the bottom status line
-        -- each `chrome_line_height` tall, plus `fm:split`'s own top/bottom
+        viewport height less the two chrome rows above/below it -- the
+        outer split's divider and the bottom status line -- each
+        `chrome_line_height` tall, plus `fm:split`'s own top/bottom
         `padding` (quantised the same way the engine quantises it on this
         backend -- see `_quantise_rows`'s own doc), all converted into row
         units via `line_height`. Reads the cached metrics `__init__`
@@ -2321,7 +2040,7 @@ class FileManager:
         not stacked) so this doubles as their row capacity too --
         `_preview_content_capacity` derives the preview's own (smaller, for
         its header and that split's own divider) line cap from it."""
-        chrome_rows = 3 * self._chrome_line_height / self._line_height
+        chrome_rows = 2 * self._chrome_line_height / self._line_height
         padding_rows = 2 * _quantise_rows(_PANE_PADDING_PX, self._line_height) / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows - padding_rows))
 
@@ -2381,16 +2100,14 @@ class FileManager:
             int(delay) if isinstance(delay, (int, float)) and delay > 0 else _DEFAULT_TOOLTIP_DELAY_MS
         )
 
-    def _hover_target_for(self, widget_id: str, hit: dict) -> dict | None:
-        """The `_hover` target a hit-tested `MouseEntered`'s own `widget` +
-        `"hit"` resolves to, or `None` for a hit this app has no tooltip
-        for (a header, a scrollbar, ...). `tree_chevron` folds into the
-        same `"tree"` target as `tree_row` -- a pointer crossing a row's
-        own expand/collapse triangle on its way across the row is still,
-        to the user, hovering that row, not leaving it."""
+    def _hover_target_for(self, hit: dict) -> dict | None:
+        """The `_hover` target a hit-tested `MouseEntered`'s own `"hit"`
+        resolves to, or `None` for a hit this app has no tooltip for (a
+        header, a scrollbar, ...). `tree_chevron` folds into the same
+        `"tree"` target as `tree_row` -- a pointer crossing a row's own
+        expand/collapse triangle on its way across the row is still, to
+        the user, hovering that row, not leaving it."""
         kind = hit.get("kind")
-        if kind == "sidebar_panel_toolbar_button":
-            return {"kind": "toolbar", "action_id": widget_id}
         if kind in ("tree_row", "tree_chevron"):
             return {"kind": "tree", "row": hit.get("row")}
         if kind == "data_table_row":
@@ -2402,11 +2119,10 @@ class FileManager:
         whatever tooltip was showing before -- harmless when nothing was --
         so a timer still in flight for the previous hover can never show a
         stale tooltip once it fires. Arms a fresh delayed `show` only when
-        the new hit is one of the three kinds this app has a tooltip for,
+        the new hit is one of the two kinds this app has a tooltip for,
         and only where `hover_tooltips_enabled` says a tooltip should show at
         all -- see the "chrome: hover tooltips" section's own doc."""
-        widget_id = event["MouseEntered"]["widget"]
-        target = self._hover_target_for(widget_id, event.get("hit") or {})
+        target = self._hover_target_for(event.get("hit") or {})
         self._hover_gen += 1
         self._tooltip_visible = False
         self.actions.hide_tooltip()
@@ -2484,13 +2200,6 @@ class FileManager:
         top_inset = _quantise_rows(_PANE_PADDING_PX, self._line_height)
         left_inset = _quantise_cols(_PANE_PADDING_PX, self._char_width)
         kind = hover["kind"]
-        if kind == "toolbar":
-            text = _TOOLBAR_TOOLTIPS.get(hover["action_id"])
-            if not text:
-                return None, None
-            x, _y = self._hover_pointer or (0.0, 0.0)
-            anchor = (x, 0.0, 1.0, self._chrome_line_height)
-            return anchor, {"id": "fm:tooltip:toolbar", "text": text}
         if kind == "tree":
             _rows, entries = self._sidebar()
             row = hover["row"]
@@ -2498,12 +2207,7 @@ class FileManager:
                 return None, None  # section headers explain themselves
             node = self._node_for(entries[row].path)
             x = left_inset + _TREE_BORDER_INSET
-            y = (
-                self._chrome_line_height
-                + top_inset
-                + _TREE_BORDER_INSET
-                + (row - self.scroll) * self._line_height
-            )
+            y = top_inset + _TREE_BORDER_INSET + (row - self.scroll) * self._line_height
             width = max(1.0, self.ratio * self._viewport_width - 2 * _TREE_BORDER_INSET - left_inset)
             return (x, y, width, self._line_height), _tooltip_payload("fm:tooltip:tree", node)
         if kind == "details":
@@ -2516,7 +2220,7 @@ class FileManager:
                 return None, None
             node = children[row]
             x = left_inset + self.ratio * self._viewport_width
-            default_y = self._chrome_line_height + top_inset + self._line_height
+            default_y = top_inset + self._line_height
             _x, y = self._hover_pointer or (0.0, default_y)
             second_split_width = (1.0 - self.ratio) * self._viewport_width
             details_width = (
@@ -3771,11 +3475,10 @@ class FileManager:
 
     def _render(self) -> dict:
         """Per-frame: rebuild the whole frame from state. An outer vertical split
-        stacks the chrome+body (top) over a one-line status bar (bottom); the
-        body is the resizable sidebar/(details|preview) split, wrapped in a
-        `sidebar_panel` whose reserved slot paints the toolbar above it. The
-        details and preview panes are themselves a nested resizable split, so
-        the frame is sidebar | details | preview overall -- unless
+        stacks the body (top) over a one-line status bar (bottom); the body
+        is the resizable sidebar/(details|preview) split. The details and
+        preview panes are themselves a nested resizable split, so the frame
+        is sidebar | details | preview overall -- unless
         `preview_visible` is off, in which case the preview (header and
         content both) is dropped and the details pane fills that whole
         second slot on its own, giving its width back without disturbing
@@ -3800,7 +3503,7 @@ class FileManager:
             if self.preview_visible
             else self._details_pane()
         )
-        body = {
+        chrome = {
             "split": {
                 "id": "fm:split",
                 "orientation": "horizontal",  # panes side by side, vertical divider
@@ -3815,13 +3518,6 @@ class FileManager:
             },
             "padding": _PANE_PADDING_PX,
             "gap": _PANE_GAP_PX,
-        }
-        chrome = {
-            "sidebar_panel": {
-                "id": "fm:chrome",
-                "toolbar": _toolbar(self._nerd_fonts_enabled),  # reserved top slot, one line per backend
-                "content": body,
-            }
         }
         # Pin the status bar to the bottom line: `ratio` derives from the known
         # height so the bottom pane is ~one chrome-sized line (`chrome_line_height`
@@ -3960,11 +3656,6 @@ class FileManager:
             return
         if "ToastActionClicked" in event:
             self._on_toast_action(event["ToastActionClicked"])
-            return
-        if "Toolbar" in event:
-            bar_id, toolbar_event = event["Toolbar"]
-            if bar_id == TOOLBAR_ID and "ButtonClicked" in toolbar_event:
-                self._on_toolbar_button(toolbar_event["ButtonClicked"]["id"])
             return
 
         key = _event_key(event)
@@ -4115,57 +3806,8 @@ class FileManager:
             self._paste()
         elif accel_id in ("fm:accel:get_info", "fm:accel:get_info_cmd"):
             self._request_get_info(self._delete_candidate())
-
-    def _on_toolbar_button(self, button_id: str) -> None:
-        """A real `Toolbar`/`ButtonClicked` event -- a click on one of
-        `_toolbar`'s own buttons, routed here from `_dispatch`. Runs the
-        exact same call its keyboard equivalent runs (see `_on_key`), so a
-        toolbar click and the matching keystroke always do the same thing;
-        `TOOLBAR_QUIT_ID` is the one exception, handled the same way
-        `_on_menu_item`'s tray `Quit` item already is (see its own doc) --
-        setting the flag `_wrap_quit` checks after every dispatch, since
-        this handler itself cannot unwind a real run loop.
-
-        Dropped outright under the same conditions `_on_accelerator`
-        already drops its own equivalents (see its own doc): the confirm
-        dialog or context menu being up is not actually reachable here --
-        both consume/dismiss the `MouseDown` that would otherwise produce
-        this click, before it ever becomes a `Toolbar` event -- but
-        `edit_mode` is: `_dispatch`'s `_handle_edit_key` call only
-        swallows *key* events, so a toolbar click while the filter/rename
-        box is open falls straight through to here. Without this guard,
-        clicking Rename mid-filter swaps the filter box for a rename box,
-        and clicking Quit sets `_quit_requested` (which `_wrap_quit` checks
-        unconditionally) and quits mid-rename -- whereas `q`/`F2` typed
-        into the box are just characters appended to it. Kept symmetrical
-        with `_on_accelerator`'s own guard rather than special-cased per
-        button."""
-        if self.edit_mode is not None or self._delete_target is not None or self._menu_target is not None:
-            return
-        self.message = ""
-        if button_id == TOOLBAR_BACK_ID:
-            self._go_back()
-        elif button_id == TOOLBAR_FORWARD_ID:
-            self._go_forward()
-        elif button_id == TOOLBAR_UP_ID:
-            if not self._go_up():
-                self.message = "already at the top"
-        elif button_id == TOOLBAR_OPEN_ID:
-            self._open_table_selection_or_cursor()
-        elif button_id == TOOLBAR_PREVIEW_ID:
-            self._toggle_preview()
-        elif button_id == TOOLBAR_REFRESH_ID:
-            self._refresh()
-        elif button_id == TOOLBAR_DELETE_ID:
-            self._request_delete(self._delete_candidate())
-        elif button_id == TOOLBAR_MENU_ID:
+        elif accel_id == "fm:accel:menu":
             self._request_context_menu(self._delete_candidate())
-        elif button_id == TOOLBAR_SEARCH_ID:
-            self._start_filter()
-        elif button_id == TOOLBAR_RENAME_ID:
-            self._start_rename(self._delete_candidate())
-        elif button_id == TOOLBAR_QUIT_ID:
-            self._quit_requested = True
 
 
 # --- inspection / headless helpers -------------------------------------------

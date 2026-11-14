@@ -86,6 +86,4 @@ def test_the_highlight_follows_the_place_and_clears_off_one(sidebar_fm):
 
     assert fm.cursor.name == "beta"
     assert fm._sidebar_selected_index(entries) is None
-    assert fm._render()["split"]["first"]["sidebar_panel"]["content"]["split"]["first"]["tree"][
-        "selected_path"
-    ] is None
+    assert fm._render()["split"]["first"]["split"]["first"]["tree"]["selected_path"] is None

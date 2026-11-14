@@ -57,7 +57,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
 | **Preview** | Read-only preview pane for the selected file | ✅ all backends |
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
-| **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the toolbar, sidebar and details rows | ✅ all backends; native manual verification pending |
+| **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the sidebar and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
 
 Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
@@ -93,19 +93,20 @@ at all (`UNDO_SUPPORTED` in `app.py`) — a host capability, not a backend branc
 
 A right-click would be the natural way to raise the context menu, but the pinned
 quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
-them, so `Menu` is the keyboard stand-in.
+them (JDonaghy/quadraui#2555), so `Menu`/`Shift+F10` are the keyboard stand-ins —
+there's no mouse-only path to it in the TUI until that's fixed upstream.
 
 The left pane is the host OS's own sidebar (Finder's Favorites/iCloud/Locations on
 macOS, Explorer's Quick access/This PC on Windows, Nautilus's places on Linux), even in
 the TUI. Picking a place shows it in the current tab. The tabs browse like Explorer's:
 opening a folder navigates in place, each tab keeps its own Back/Forward history
-(Backspace/`[` and `]`, or the toolbar), the address bar's breadcrumbs jump to any
+(Backspace/`[` and `]`), the address bar's breadcrumbs jump to any
 ancestor, `t` opens a new tab and `w` closes one. Arrow keys act on whichever pane has
 key focus (the list by default; Tab switches). In the list, Right opens the selected
 folder and Left goes up, selecting the folder you came from. With no PATH the app opens
 on the home folder. See [`docs/VISION.md`](docs/VISION.md) for the intended UX.
 
-In the TUI, codicon glyphs (sidebar places, toolbar, grid markers) need Nerd Font
+In the TUI, codicon glyphs (sidebar places, grid markers) need Nerd Font
 symbols. `--tui` turns them on automatically in terminals that bundle them (Ghostty,
 kitty, WezTerm; detected through tmux too); force it with `--nerd-fonts` /
 `--no-nerd-fonts` or `QUADRAUI_FILES_NERD_FONTS=1`/`0`. Without them, sidebar places

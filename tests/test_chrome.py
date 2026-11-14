@@ -1,7 +1,7 @@
 """T3b black-box tests: OS-theme match, the global keybindings, notifications,
 and the overlay guard -- driven headlessly through `FileManager.step`, same
 as the other suites (see `app.py`'s module doc). Real pointer-hover
-tooltips (toolbar/tree/details) have their own suite, `tests/test_tooltips.py`.
+tooltips (tree/details) have their own suite, `tests/test_tooltips.py`.
 """
 
 from conftest import activate_child as _activate_child
@@ -33,19 +33,19 @@ def test_dark_system_theme_paints_the_vscode_dark_palette(sample_tree, monkeypat
     fm = FileManager(sample_tree, width=60, height=20)
     assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
     # Prove it actually painted, not just that `theme()` reads the override
-    # back (`cell_colors`'s own doc): cell (0, 0) is inside the toolbar's
-    # first button, whose background is theme-driven (`StyledText`'s `bg:
-    # None` lets the theme through).
-    _fg, bg = fm.app.cell_colors(0, 0)
-    assert bg == (45, 45, 45), f"toolbar background not repainted dark: {bg}"
+    # back (`cell_colors`'s own doc): cell (12, 2) sits in `fm:split`'s own
+    # padding/gap band, theme-driven background with nothing else painted
+    # over it at this width/height.
+    _fg, bg = fm.app.cell_colors(12, 2)
+    assert bg == (30, 30, 30), f"background not repainted dark: {bg}"
 
 
 def test_light_system_theme_paints_the_vscode_light_palette(sample_tree, monkeypatch):
     monkeypatch.setenv("COLORFGBG", "0;15")  # dark-on-light -> system is light
     fm = FileManager(sample_tree, width=60, height=20)
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
-    _fg, bg = fm.app.cell_colors(0, 0)
-    assert bg == (243, 243, 243), f"toolbar background not repainted light: {bg}"
+    _fg, bg = fm.app.cell_colors(12, 2)
+    assert bg == (255, 255, 255), f"background not repainted light: {bg}"
 
 
 def test_unsupported_system_theme_falls_back_to_the_backend_default(sample_tree, monkeypatch):
@@ -89,16 +89,16 @@ SYSTEM_THEME_CHANGED_TO_LIGHT = {
 }
 
 
-def test_system_theme_changed_event_repaints_toolbar_and_status_bar(sample_tree, monkeypatch):
+def test_system_theme_changed_event_repaints_the_body_and_status_bar(sample_tree, monkeypatch):
     """A `SystemThemeChanged` event (dark -> light) swaps the VS Code
     palette and the status-bar triple, proved the same way the startup
-    dark/light tests above do: the painted toolbar cell (theme-driven) and
+    dark/light tests above do: the painted body cell (theme-driven) and
     the painted status-bar cell (not theme-driven, picked separately --
     see `_STATUS_DARK_FG`'s own doc) both actually repaint, not just
     `fm.app.theme()`'s/`fm._status_bg`'s own readback."""
     monkeypatch.setenv("COLORFGBG", "15;0")  # system starts dark
     fm = FileManager(sample_tree, width=60, height=20)
-    _fg, toolbar_bg_before = fm.app.cell_colors(0, 0)
+    _fg, body_bg_before = fm.app.cell_colors(12, 2)
     _fg, status_bg_before = fm.app.cell_colors(0, 19)
     assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
 
@@ -106,9 +106,9 @@ def test_system_theme_changed_event_repaints_toolbar_and_status_bar(sample_tree,
 
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
     assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
-    _fg, toolbar_bg_after = fm.app.cell_colors(0, 0)
+    _fg, body_bg_after = fm.app.cell_colors(12, 2)
     _fg, status_bg_after = fm.app.cell_colors(0, 19)
-    assert toolbar_bg_after != toolbar_bg_before, "toolbar didn't repaint light"
+    assert body_bg_after != body_bg_before, "body didn't repaint light"
     assert status_bg_after != status_bg_before, "status bar didn't repaint light"
 
 
@@ -128,7 +128,7 @@ def test_system_theme_changed_applies_live_through_the_real_run_loop(sample_tree
     monkeypatch.setenv("COLORFGBG", "15;0")  # system starts dark
     fm = FileManager(sample_tree, width=60, height=20)
     assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
-    _fg, toolbar_bg_before = fm.app.cell_colors(0, 0)
+    _fg, body_bg_before = fm.app.cell_colors(12, 2)
     _fg, status_bg_before = fm.app.cell_colors(0, 19)
 
     fm.app.push_event(SYSTEM_THEME_CHANGED_TO_LIGHT)
@@ -137,9 +137,9 @@ def test_system_theme_changed_applies_live_through_the_real_run_loop(sample_tree
     assert still_running
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
     assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
-    _fg, toolbar_bg_after = fm.app.cell_colors(0, 0)
+    _fg, body_bg_after = fm.app.cell_colors(12, 2)
     _fg, status_bg_after = fm.app.cell_colors(0, 19)
-    assert toolbar_bg_after != toolbar_bg_before, "toolbar didn't repaint light"
+    assert body_bg_after != body_bg_before, "body didn't repaint light"
     assert status_bg_after != status_bg_before, "status bar didn't repaint light"
 
 

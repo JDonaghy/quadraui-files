@@ -1,5 +1,5 @@
-"""F6c black-box coverage: real pointer-hover tooltips on the toolbar, the
-tree and the details table -- `InteractionEngine::handle`'s hit-tested
+"""F6c black-box coverage: real pointer-hover tooltips on the tree and the
+details table -- `InteractionEngine::handle`'s hit-tested
 `MouseEntered`/`MouseLeft` (quadraui#2122/#2125) drives this app's own
 `self.waker.post_after`-delayed `show_tooltip`/`hide_tooltip` through
 `self.actions` (see `app.py`'s "chrome: hover tooltips" section doc), not
@@ -7,8 +7,8 @@ the keyboard cursor or the last-clicked details row the old pseudo-hover
 used.
 
 A real `MouseMoved` at painted coordinates (`find_row`, same as
-`tests/test_toolbar.py`/`tests/test_tree_click.py`) exercises the exact hit
-test a real pointer would; a short, real `time.sleep` past a `tooltip_delay_ms`
+`tests/test_tree_click.py`) exercises the exact hit test a real pointer
+would; a short, real `time.sleep` past a `tooltip_delay_ms`
 this suite shortens through `fm.app.set_style`/`fm.refresh_tooltip_delay`
 (this app's own hand-rolled timer is wall-clock-driven via
 `QuiAppWaker.post_after`, unlike the host's own virtual-clock-driven
@@ -84,28 +84,6 @@ def _open_root_tab(fm: FileManager) -> None:
     """Opens the root folder (the initial cursor) as a details tab -- same
     `ENTER_KEY` shortcut `tests/test_chrome.py`'s own `_open_root_tab` uses."""
     fm.step(_key_event(ENTER_KEY))
-
-
-# --- toolbar button ----------------------------------------------------------
-
-
-def test_hovering_a_toolbar_button_shows_its_tooltip_after_the_delay(sample_tree):
-    fm = FileManager(sample_tree, width=160, height=30)
-    _shorten_tooltip_delay(fm)
-
-    x, y = _find_row(fm, "Preview (p)")
-    _move_to(fm, x, y)
-    assert "Toggle the preview pane" not in fm.app.screen(), (
-        "landing on the button must not show the tooltip before the delay elapses"
-    )
-
-    _wait_past_the_delay_and_tick(fm)
-    assert "Toggle the preview pane" in fm.app.screen()
-
-    _move_to(fm, _OFF_X, _OFF_Y)
-    assert "Toggle the preview pane" not in fm.app.screen(), (
-        "leaving the button must hide the tooltip immediately, no delay"
-    )
 
 
 # --- tree row -----------------------------------------------------------------
@@ -242,7 +220,7 @@ def test_hovering_a_details_row_shows_path_size_and_modified_time(sample_tree):
     _wait_past_the_delay_and_tick(fm)
     screen = fm.app.screen()
     assert readme_path in screen
-    assert "5 B" in screen  # the human-readable size, exact (plain "B" matches the toolbar too)
+    assert "5 B" in screen  # the human-readable size, exact
 
     _move_to(fm, _OFF_X, _OFF_Y)
     assert readme_path not in fm.app.screen()
