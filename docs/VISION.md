@@ -7,6 +7,15 @@ to show the pitch: **write one set of Python descriptors and run it as a
 terminal UI (`--tui`) and as a native desktop window (`--native`)**. Only the
 final `run_tui()` / `run_native()` call differs.
 
+**The explicit goal is Finder parity, not just a Finder-flavored file
+manager.** Chase the real thing's browsing behavior as closely as the backend
+allows -- multi-select, Get Info, richer view modes, drag-and-drop, a context
+menu that covers what Finder's does -- rather than stopping at a passable
+look-alike. Each gap this surfaces, in the app or in quadraui itself, is the
+point: pushing for real fidelity is what puts quadraui through its paces and
+will legitimately need multiple upstream issues. See "Finder parity backlog"
+below for what's missing today.
+
 It also tests a workflow claim: quadraui plus plain Python should let one
 developer get a lot done fast, with hot reload (`--reload`). There's no
 coordinator pipeline for this repo. Work happens interactively, and gaps are
@@ -43,6 +52,39 @@ Commander or ranger. This holds even in the terminal.
   supports it. Sidebar places and drive roots can't be renamed or trashed.
 
 Priority order: **macOS TUI first**, then macOS native, then Windows/Linux.
+The backlog below is scoped and sequenced the same way: land each item on
+macOS TUI, then carry it to the other backends, rather than chasing every
+platform at once.
+
+## Finder parity backlog
+
+Core browsing fidelity, roughly in priority order. Visual/chrome polish
+(spacing, animation, exact typography) stays secondary to these -- a feature
+Finder has that this app doesn't is a bigger gap than one that merely looks
+slightly off.
+
+1. **Multi-select** in the details grid (Shift/Cmd+click, Shift+Up/Down).
+   Today `details_table`'s `selected_idx` is a single `int | None` -- check
+   whether `DataTable`'s own protocol can even carry a set of selected rows
+   before writing any app-side selection-state code; if it can't, that's the
+   first upstream issue this backlog produces.
+2. **A context menu that covers what Finder's does.** Today's is Open /
+   Reveal / Move to Trash only. Missing: New Folder, Duplicate, Copy/Paste,
+   Rename, Get Info.
+3. **Get Info** (Cmd+I): a panel or dialog with size, kind, created/modified
+   dates, permissions.
+4. **Additional view modes.** Today's details grid is Finder's "as List"
+   view; add an icon grid view (Finder's default) toggle. Column view
+   (Miller columns) is a stretch goal, lower priority than the first three.
+5. **Richer preview.** Today's preview pane is plain text lines; add image
+   thumbnails so it earns the name "Quick Look-style."
+6. **Drag-and-drop** -- move/copy within a listing, onto sidebar places,
+   between tabs. Likely native-backend-only until/unless quadraui exposes
+   something equivalent for the TUI; expect this to surface a design
+   question upstream before it's a one-line app fix.
+7. **Color tags/labels** (Finder's colored dots). Lowest priority --
+   macOS-specific metadata (extended attributes), no Explorer/Nautilus
+   equivalent to anchor a cross-platform design on.
 
 ## How to work on it
 
