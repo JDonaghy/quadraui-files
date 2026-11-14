@@ -12,12 +12,12 @@ license = { text = "MIT" }
 authors = [{ name = "John Donaghy" }]
 keywords = ["quadraui", "tui", "gui", "file-manager", "cross-platform"]
 
-# quadraui-py is on PyPI as `quadraui`; 0.10.1 is the first release with
-# everything this app uses (deferred actions, native chrome, and the
-# `quadraui.app.hot_reload` building blocks `--reload` runs on). Prebuilt
+# quadraui-py is on PyPI as `quadraui`; 0.11.0 picks up DataTable's new
+# `bordered` option (JDonaghy/quadraui#2447 -- the TUI focus ring no longer
+# paints over the details grid's header/first column/last row). Prebuilt
 # wheels: macOS/Windows (native window + TUI) and Linux (TUI-only).
 dependencies = [
-    "quadraui==0.10.1",
+    "quadraui==0.11.0",
 ]
 
 [project.optional-dependencies]

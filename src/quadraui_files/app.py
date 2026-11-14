@@ -862,6 +862,10 @@ def details_table(
         "rows": rows,
         "selected_idx": selected_idx,
         "has_focus": has_focus,
+        # Reserve a 1-cell margin so the TUI focus ring lands on that border
+        # instead of overwriting the header/first column/last row -- same
+        # fix as `TreeStyle.bordered` above (JDonaghy/quadraui#2447).
+        "bordered": True,
     }
 
 
