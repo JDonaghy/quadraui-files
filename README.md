@@ -20,6 +20,24 @@ quadraui-files ~/some/dir --tui --reload  # hot-reload edits to the app's own so
 quadraui-files ~/some/dir --dump # descriptor dump
 ```
 
+### As a macOS app
+
+`--native` from a terminal runs as an unbundled script: the app menu reads "Python"
+(Homebrew's `Python.app` names the process), and since macOS 14 a terminal that won't
+yield focus (Ghostty) keeps its own menu bar in front. A real `.app` bundle fixes both:
+
+```bash
+sh scripts/build-macos-app.sh           # dist/Quadraui Files.app (PyInstaller)
+sh scripts/build-macos-app.sh --dmg     # + dist/Quadraui-Files-<version>.dmg
+open "dist/Quadraui Files.app"          # opens on ~; or: open -a "dist/Quadraui Files.app" --args ~/src
+```
+
+The bundle has its own privacy grants, so the first look at Desktop/Documents/Downloads
+asks for permission. The build is ad-hoc signed and only runs on the Mac that built it.
+To run it on other Macs, set `CODESIGN_IDENTITY="Developer ID Application: …"` and
+notarize the `.dmg` (`xcrun notarytool submit … --wait`, then `xcrun stapler staple`).
+The quadraui wheel is arm64-only, so the app is too. It has no icon yet.
+
 The virtualenv is not optional: `quadraui` is only ever installed into it (never
 into the system Python), so `pytest` must run with that env active —
 
@@ -59,7 +77,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
 | **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the sidebar and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
-| **Menu bar** | A real menu bar (`Alt+<letter>`/click, arrow nav, Esc) -- File > New Folder/New Tab, View > Hide/Show Sidebar, Hide/Show Preview | ✅ TUI; broken on native macOS (JDonaghy/quadraui#2560, see [known limits](#known-limits)) |
+| **Menu bar** | A real menu bar (`Alt+<letter>`/click, arrow nav, Esc) -- File > New Folder/New Tab, View > Hide/Show Sidebar, Hide/Show Preview | ✅ TUI; native macOS fixed upstream, awaiting a quadraui release (JDonaghy/quadraui#2560, see [known limits](#known-limits)) |
 
 Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
 the app's own delayed-show/auto-dismiss timers through `QuiAppWaker.post_after`, which
@@ -110,9 +128,14 @@ but as actually tested, a `menu_bar` leaf nested inside a `split` (the shape thi
 uses, to pin it to one row the same way the toolbar used to be) never installs: the
 system menu bar shows only AppKit's own unbundled-script boilerplate (`Python`, File,
 Edit, View, Window, Help — View's own generic `Show Tab Bar`/`Enter Full Screen`, not
-ours), filed as JDonaghy/quadraui#2560. Launching from some terminal emulators (seen
+ours), filed as JDonaghy/quadraui#2560 and fixed on quadraui's `develop` (PR #2567)
+but not yet in a PyPI release -- the 0.11.0 pin still has it. To try the fix before a
+release, build quadraui from `develop`:
+`MATURIN_PEP517_ARGS="--features macos" pip install --force-reinstall --no-deps --no-cache-dir "quadraui @ git+https://github.com/JDonaghy/quadraui.git@develop#subdirectory=quadraui-py"`.
+Launching from some terminal emulators (seen
 with Ghostty) hits a separate, broader problem first — the app never activates as the
-foreground process at all (JDonaghy/quadraui#2561, same class of bug as #1333).
+foreground process at all (JDonaghy/quadraui#2561, same class of bug as #1333). The
+[app bundle](#as-a-macos-app) sidesteps it: LaunchServices activates a bundled app.
 
 The left pane is the host OS's own sidebar (Finder's Favorites/iCloud/Locations on
 macOS, Explorer's Quick access/This PC on Windows, Nautilus's places on Linux), even in
