@@ -4,29 +4,37 @@ Windows -- only the final run call differs per platform.
 
 Layout (the `render` callback returns a *layout tree*):
 
-    split (vertical: chrome + body stacked over a status bar)
-    ├─ first  : split (resizable divider, draggable)
-    │            ├─ first  : the PLACES sidebar -- Finder's
-    │            │           Favorites/Locations on macOS,
-    │            │           Explorer's Quick access/This PC
-    │            │           on Windows, Nautilus's places on
-    │            │           Linux -- collapsible sections
-    │            └─ second : split (resizable divider, draggable)
-    │                         ├─ first  : tabs, one per browsing
-    │                         │           location; each tab is an
-    │                         │           address bar (clickable
-    │                         │           breadcrumbs) over a
-    │                         │           data_table of that
-    │                         │           folder's contents
-    │                         └─ second : a split (header over
-    │                                     content) -- a one-line
-    │                                     header naming/sizing
-    │                                     the last file selected
-    │                                     in a details table,
-    │                                     over a read-only
-    │                                     preview of it; `p`
-    │                                     hides the whole thing
-    └─ second : a live status bar (current folder, item count, open tabs)
+    split (vertical: menu bar over everything else)
+    ├─ first  : a menu bar (today: View > Hide/Show Sidebar,
+    │           Hide/Show Preview)
+    └─ second : split (vertical: body stacked over a status bar)
+                ├─ first  : split (resizable divider, draggable)
+                │            │           -- dropped, giving its width to
+                │            │           the pane below, when the View
+                │            │           menu's Hide Sidebar is chosen
+                │            ├─ first  : the PLACES sidebar -- Finder's
+                │            │           Favorites/Locations on macOS,
+                │            │           Explorer's Quick access/This PC
+                │            │           on Windows, Nautilus's places on
+                │            │           Linux -- collapsible sections
+                │            └─ second : split (resizable divider, draggable)
+                │                         ├─ first  : tabs, one per browsing
+                │                         │           location; each tab is an
+                │                         │           address bar (clickable
+                │                         │           breadcrumbs) over a
+                │                         │           data_table of that
+                │                         │           folder's contents
+                │                         └─ second : a split (header over
+                │                                     content) -- a one-line
+                │                                     header naming/sizing
+                │                                     the last file selected
+                │                                     in a details table,
+                │                                     over a read-only
+                │                                     preview of it;
+                │                                     Hide Preview/`p`
+                │                                     hides the whole thing
+                └─ second : a live status bar (current folder, item count,
+                            open tabs)
 
 The sidebar is navigation only, like Finder's: picking a place shows it in
 the active tab. The tabs browse like Explorer's: each one keeps its own
@@ -98,6 +106,8 @@ key focus -- the file list (the default), or the sidebar:
   right-click empty grid   open the context menu for the browsed folder --
     space                   see the right-click paragraph below for why
                             this works but right-clicking a row doesn't, yet
+  Alt+V        open the menu bar's View menu (click works too); arrows
+               move within it, Enter activates, Esc closes
   q / Escape   quit the real run loops
 
 A right-click on a row would be the natural way to open the context menu,
@@ -1214,6 +1224,74 @@ def _quantise_rows(px: float, line_height: float) -> float:
     return math.ceil(px / _NOMINAL_CELL_PX_HEIGHT)
 
 
+# --- chrome: menu bar ---------------------------------------------------------
+#
+# Finder has a real menu bar; this app's own `menu_bar` leaf is the closest
+# quadraui has, on every backend -- including macOS, though not quite the
+# way it sounds: `quadraui::macos::menu_bar::draw_menu_bar` rasterises it
+# *inside* the app's own window surface, the same `NativeSurface` paint
+# path `toolbar`/`activity_bar` already used, not a real global `NSMenu`
+# docked to the top of the screen outside the window. Still a real,
+# interactive menu bar in every other sense: open/close, hover-to-switch
+# between top-level menus, Alt+<mnemonic-letter> activation (an item's
+# `&` prefix marks which letter -- `&View` underlines "V"), arrow-key
+# navigation within an open dropdown, and Escape-to-close are all handled
+# internally by the engine's own interaction layer, the same way `DataTable`
+# row selection is once it has focus -- this app never tracks `open_item`/
+# `focused_item` itself (always `None`) and never sees an "opened"/"closed"
+# event for a dropdown, only `MenuActivated` once an actual item (not a
+# parent with its own submenu) is chosen. Confirmed by direct testing
+# against quadraui 0.11.0: a click or Alt+<letter> on a top-level item
+# opens/closes/switches dropdowns with no app involvement at all; clicking
+# or Enter-ing a leaf item fires `{"MenuActivated": "<that item's id>"}`
+# and closes the dropdown, both without any other event this app has to
+# filter out first.
+#
+# Pinned to its own 1-line `first_min` the same way the now-removed
+# toolbar was -- see `_render`'s own doc -- above everything else in the
+# window, including the status bar. Only a "View" menu exists so far
+# (Hide/Show Sidebar, Hide/Show Preview, each item's own label flipping
+# with the state it toggles, the way Finder's real "Hide Sidebar"/"Show
+# Sidebar" does -- not a static label plus a `checked` checkmark); File/
+# Edit/Window/Help are natural follow-ups once there's a real action to
+# hang on each one.
+
+MENU_BAR_ID = "fm:menubar"
+MENU_VIEW_ID = "menu:view"
+MENU_VIEW_SIDEBAR_ID = "view:sidebar"
+MENU_VIEW_PREVIEW_ID = "view:preview"
+
+
+def _menu_bar(*, sidebar_visible: bool, preview_visible: bool) -> dict:
+    """The `menu_bar` leaf for `_render`'s own topmost strip. Rebuilt every
+    frame (like `_toolbar` used to be) since an item's own label depends on
+    live state."""
+    return {
+        "id": MENU_BAR_ID,
+        "menu_bar": {
+            "id": MENU_BAR_ID,
+            "items": [
+                {
+                    "id": MENU_VIEW_ID,
+                    "label": "&View",
+                    "submenu": [
+                        {
+                            "id": MENU_VIEW_SIDEBAR_ID,
+                            "label": _styled_text("Hide Sidebar" if sidebar_visible else "Show Sidebar"),
+                        },
+                        {
+                            "id": MENU_VIEW_PREVIEW_ID,
+                            "label": _styled_text("Hide Preview" if preview_visible else "Show Preview"),
+                        },
+                    ],
+                },
+            ],
+            "open_item": None,
+            "focused_item": None,
+        },
+    }
+
+
 # --- chrome: status bar -------------------------------------------------------
 #
 # `StatusBarSegment` requires explicit fg + bg (unlike the theme-driven
@@ -1646,6 +1724,7 @@ class FileManager:
         self.ratio = 0.2                # sidebar width fraction
         self.preview_ratio = 0.65       # details-vs-preview width fraction, within the body's second pane
         self.preview_visible = True     # `p`/header-× toggle; preview_ratio is kept either way
+        self.sidebar_visible = True     # View menu's Hide/Show Sidebar; `ratio` is kept either way
         # One entry per tab: the folder it shows, and its own Back/Forward
         # stacks (most recent last). There is always at least one tab.
         self.open: list[Node] = [self.root]
@@ -2073,21 +2152,26 @@ class FileManager:
 
     def _tree_capacity(self) -> int:
         """Painted rows that fit in the body's row band: the app's measured
-        viewport height less the two chrome rows above/below it -- the
-        outer split's divider and the bottom status line -- each
-        `chrome_line_height` tall, plus `fm:split`'s own top/bottom
-        `padding` (quantised the same way the engine quantises it on this
-        backend -- see `_quantise_rows`'s own doc), all converted into row
-        units via `line_height`. Reads the cached metrics `__init__`
-        measured from `self.app` itself (`viewport`/`line_height`/
-        `chrome_line_height`/`char_width`) rather than guessing from the
-        constructor's `height` argument. Named for the tree, its first
-        caller, but the details and preview panes sit in that same
-        vertical band (the nested detail/preview split is side-by-side,
-        not stacked) so this doubles as their row capacity too --
-        `_preview_content_capacity` derives the preview's own (smaller, for
-        its header and that split's own divider) line cap from it."""
-        chrome_rows = 2 * self._chrome_line_height / self._line_height
+        viewport height less the four chrome rows above/below it -- the
+        menu bar row, `fm:menubar_split`'s own divider, `fm:outer`'s own
+        divider, and the bottom status line -- each `chrome_line_height`
+        tall, plus `fm:split`'s own top/bottom `padding` (quantised the
+        same way the engine quantises it on this backend -- see
+        `_quantise_rows`'s own doc), all converted into row units via
+        `line_height`. Two nested vertical splits (menu bar over
+        everything, then body over the status bar) cost two divider rows,
+        not one -- confirmed by counting the real painted screen rather
+        than assuming dividers are free. Reads the cached metrics
+        `__init__` measured from `self.app` itself (`viewport`/
+        `line_height`/`chrome_line_height`/`char_width`) rather than
+        guessing from the constructor's `height` argument. Named for the
+        tree, its first caller, but the details and preview panes sit in
+        that same vertical band (the nested detail/preview split is
+        side-by-side, not stacked) so this doubles as their row capacity
+        too -- `_preview_content_capacity` derives the preview's own
+        (smaller, for its header and that split's own divider) line cap
+        from it."""
+        chrome_rows = 4 * self._chrome_line_height / self._line_height
         padding_rows = 2 * _quantise_rows(_PANE_PADDING_PX, self._line_height) / self._line_height
         return max(1, int(self._viewport_height / self._line_height - chrome_rows - padding_rows))
 
@@ -2254,7 +2338,12 @@ class FileManager:
                 return None, None  # section headers explain themselves
             node = self._node_for(entries[row].path)
             x = left_inset + _TREE_BORDER_INSET
-            y = top_inset + _TREE_BORDER_INSET + (row - self.scroll) * self._line_height
+            y = (
+                2 * self._chrome_line_height  # the menu bar row, then its own split's divider
+                + top_inset
+                + _TREE_BORDER_INSET
+                + (row - self.scroll) * self._line_height
+            )
             width = max(1.0, self.ratio * self._viewport_width - 2 * _TREE_BORDER_INSET - left_inset)
             return (x, y, width, self._line_height), _tooltip_payload("fm:tooltip:tree", node)
         if kind == "details":
@@ -2267,7 +2356,7 @@ class FileManager:
                 return None, None
             node = children[row]
             x = left_inset + self.ratio * self._viewport_width
-            default_y = top_inset + self._line_height
+            default_y = 2 * self._chrome_line_height + top_inset + self._line_height
             _x, y = self._hover_pointer or (0.0, default_y)
             second_split_width = (1.0 - self.ratio) * self._viewport_width
             details_width = (
@@ -2346,6 +2435,26 @@ class FileManager:
         `preview_ratio` is left untouched either way, so re-showing it
         restores the same divider position it had before."""
         self.preview_visible = not self.preview_visible
+
+    def _toggle_sidebar(self) -> None:
+        """View > Hide/Show Sidebar. `ratio` is left untouched either way,
+        the same `preview_ratio`-survives-a-hide story `_toggle_preview`
+        already has. Hiding it while it holds key focus hands focus back
+        to the list -- `_on_key`'s own guards stop it being handed there
+        again while hidden, but can't retroactively fix focus that was
+        already there the moment this runs."""
+        self.sidebar_visible = not self.sidebar_visible
+        if not self.sidebar_visible:
+            self.table_focus = True
+
+    def _on_menu_activated(self, item_id: str) -> None:
+        """A `MenuActivated` event: an actual menu-bar item was chosen (not
+        a parent whose own click just opens/closes its submenu -- that
+        never reaches the app at all, see `_menu_bar`'s own doc)."""
+        if item_id == MENU_VIEW_SIDEBAR_ID:
+            self._toggle_sidebar()
+        elif item_id == MENU_VIEW_PREVIEW_ID:
+            self._toggle_preview()
 
     def _sidebar_entry(self, path: list[int]) -> PlaceSection | Place | None:
         rows, entries = self._sidebar()
@@ -2491,8 +2600,11 @@ class FileManager:
                 self.message = f"{self.selected_file.name} is a file — press Enter to open it"
             return
         if not self._go_up():
-            self.table_focus = False
-            self.message = "arrows are on the sidebar"
+            if self.sidebar_visible:
+                self.table_focus = False
+                self.message = "arrows are on the sidebar"
+            else:
+                self.message = "already at the top"
 
     # --- file actions: delete/trash, open, reveal, context menu -------------
     #
@@ -3521,20 +3633,24 @@ class FileManager:
         }
 
     def _render(self) -> dict:
-        """Per-frame: rebuild the whole frame from state. An outer vertical split
-        stacks the body (top) over a one-line status bar (bottom); the body
-        is the resizable sidebar/(details|preview) split. The details and
-        preview panes are themselves a nested resizable split, so the frame
-        is sidebar | details | preview overall -- unless
-        `preview_visible` is off, in which case the preview (header and
-        content both) is dropped and the details pane fills that whole
-        second slot on its own, giving its width back without disturbing
-        `preview_ratio` (restored from, unchanged, the next time the
-        preview is shown again). Reads only."""
+        """Per-frame: rebuild the whole frame from state. A menu bar (View >
+        Hide/Show Sidebar, Hide/Show Preview) sits above everything else,
+        pinned to its own 1-line `first_min` the same way the now-removed
+        toolbar was. Below it, an outer vertical split stacks the body over
+        a one-line status bar; the body is the resizable sidebar/
+        (details|preview) split -- unless `sidebar_visible` is off, in
+        which case the sidebar is dropped and the details/preview pane
+        fills the whole body on its own, giving its width back without
+        disturbing `ratio` (restored, unchanged, the next time the sidebar
+        is shown again). The details and preview panes are themselves a
+        nested resizable split, so the frame is menu bar | sidebar |
+        details | preview | status bar overall -- unless `preview_visible`
+        is off, in which case the preview (header and content both) is
+        dropped the same `ratio`-preserving way. Reads only."""
         rows, entries = self._sidebar()
         selected_index = self._sidebar_selected_index(entries)
         selected_path = None if selected_index is None else rows[selected_index]["path"]
-        if selected_index is not None:
+        if selected_index is not None and self.sidebar_visible:
             self._scroll_to_cursor(selected_index, len(rows))
         details_and_preview = (
             {
@@ -3550,22 +3666,31 @@ class FileManager:
             if self.preview_visible
             else self._details_pane()
         )
-        chrome = {
-            "split": {
-                "id": "fm:split",
-                "orientation": "horizontal",  # panes side by side, vertical divider
-                "ratio": self.ratio,
-                "first": sidebar_leaf(
-                    rows,
-                    selected_path=selected_path,
-                    scroll_offset=self.scroll,
-                    has_focus=not self.table_focus,
-                ),
-                "second": details_and_preview,
-            },
-            "padding": _PANE_PADDING_PX,
-            "gap": _PANE_GAP_PX,
-        }
+        body = (
+            {
+                "split": {
+                    "id": "fm:split",
+                    "orientation": "horizontal",  # panes side by side, vertical divider
+                    "ratio": self.ratio,
+                    "first": sidebar_leaf(
+                        rows,
+                        selected_path=selected_path,
+                        scroll_offset=self.scroll,
+                        has_focus=not self.table_focus,
+                    ),
+                    "second": details_and_preview,
+                },
+                "padding": _PANE_PADDING_PX,
+                "gap": _PANE_GAP_PX,
+            }
+            if self.sidebar_visible
+            # No sidebar to pad *from* -- but `details_and_preview` is
+            # always itself a `split` (never a bare leaf), so it still
+            # takes the same outer inset `fm:split` gave the whole body,
+            # on top of whatever `gap` it may already carry for its own
+            # detail/preview divider.
+            else {**details_and_preview, "padding": _PANE_PADDING_PX}
+        )
         # Pin the status bar to the bottom line: `ratio` derives from the known
         # height so the bottom pane is ~one chrome-sized line (`chrome_line_height`
         # -- VS Code's own 22px status-bar pitch on a real pixel backend, one TUI
@@ -3576,21 +3701,35 @@ class FileManager:
         # it, even TUI), so the bottom pane grows to 3 while `edit_mode` is set --
         # but never past what the chrome's own 3.0 `first_min` leaves available,
         # so the two mins can never sum past the viewport on a tiny terminal
-        # (e.g. `h == 4` would otherwise ask for 3.0 + 3.0 of 4.0 rows).
-        h = max(self.height, 2)
+        # (e.g. `h == 4` would otherwise ask for 3.0 + 3.0 of 4.0 rows). `h` here
+        # is the height left for everything *below* the menu bar -- the outer-
+        # outer split below already took that row off the top.
+        menu_rows = self._chrome_line_height / self._line_height
+        h = max(self.height - menu_rows, 2.0)
         first_min = 3.0
         available_for_bottom = max(1.0, h - first_min)
         status_rows = self._chrome_line_height / self._line_height
         bottom_rows = min(3.0, available_for_bottom) if self.edit_mode else min(status_rows, available_for_bottom)
-        return {
+        outer = {
             "split": {
                 "id": "fm:outer",
-                "orientation": "vertical",  # chrome+body stacked over the status bar
+                "orientation": "vertical",  # body stacked over the status bar
                 "ratio": (h - bottom_rows) / h,
                 "first_min": first_min,
                 "second_min": bottom_rows,
-                "first": chrome,
+                "first": body,
                 "second": self._edit_leaf() if self.edit_mode else self._status_leaf(),
+            }
+        }
+        h_total = max(self.height, 2.0)
+        return {
+            "split": {
+                "id": "fm:menubar_split",
+                "orientation": "vertical",  # menu bar over everything else
+                "ratio": menu_rows / h_total,  # `first` (the menu bar) is the *small* pane here
+                "first_min": menu_rows,
+                "first": _menu_bar(sidebar_visible=self.sidebar_visible, preview_visible=self.preview_visible),
+                "second": outer,
             }
         }
 
@@ -3727,6 +3866,9 @@ class FileManager:
         if "ContextMenuItemActivated" in event:
             self._on_menu_item(event["ContextMenuItemActivated"])
             return
+        if "MenuActivated" in event:
+            self._on_menu_activated(event["MenuActivated"])
+            return
         if "ToastActionClicked" in event:
             self._on_toast_action(event["ToastActionClicked"])
             return
@@ -3818,8 +3960,11 @@ class FileManager:
                 self.table_focus = True
         elif name in ("Tab", "BackTab"):
             # Only reached where the engine doesn't cycle focus itself (it
-            # normally consumes Tab and sends `FocusChanged` instead).
-            self.table_focus = not self.table_focus
+            # normally consumes Tab and sends `FocusChanged` instead). A
+            # hidden sidebar has no row of its own to hand focus to, so
+            # there's nothing to toggle onto -- stays on the list.
+            if self.sidebar_visible:
+                self.table_focus = not self.table_focus
         elif name in ("Enter", "o"):
             self._open_table_selection_or_cursor()
         elif name in ("Backspace", "["):

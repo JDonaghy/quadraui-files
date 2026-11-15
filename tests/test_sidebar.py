@@ -86,4 +86,7 @@ def test_the_highlight_follows_the_place_and_clears_off_one(sidebar_fm):
 
     assert fm.cursor.name == "beta"
     assert fm._sidebar_selected_index(entries) is None
-    assert fm._render()["split"]["first"]["split"]["first"]["tree"]["selected_path"] is None
+    # past the menu bar (`second`), past the status split (`split`/`first`),
+    # into the sidebar|details split (`split`/`first`) to the tree leaf itself.
+    frame = fm._render()["split"]["second"]["split"]["first"]["split"]["first"]
+    assert frame["tree"]["selected_path"] is None

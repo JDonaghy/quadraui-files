@@ -33,10 +33,10 @@ def test_dark_system_theme_paints_the_vscode_dark_palette(sample_tree, monkeypat
     fm = FileManager(sample_tree, width=60, height=20)
     assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
     # Prove it actually painted, not just that `theme()` reads the override
-    # back (`cell_colors`'s own doc): cell (12, 2) sits in `fm:split`'s own
-    # padding/gap band, theme-driven background with nothing else painted
+    # back (`cell_colors`'s own doc): cell (12, 1) sits on the menu bar's
+    # own divider row, theme-driven background with nothing else painted
     # over it at this width/height.
-    _fg, bg = fm.app.cell_colors(12, 2)
+    _fg, bg = fm.app.cell_colors(12, 1)
     assert bg == (30, 30, 30), f"background not repainted dark: {bg}"
 
 
@@ -44,7 +44,7 @@ def test_light_system_theme_paints_the_vscode_light_palette(sample_tree, monkeyp
     monkeypatch.setenv("COLORFGBG", "0;15")  # dark-on-light -> system is light
     fm = FileManager(sample_tree, width=60, height=20)
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
-    _fg, bg = fm.app.cell_colors(12, 2)
+    _fg, bg = fm.app.cell_colors(12, 1)
     assert bg == (255, 255, 255), f"background not repainted light: {bg}"
 
 
@@ -98,7 +98,7 @@ def test_system_theme_changed_event_repaints_the_body_and_status_bar(sample_tree
     `fm.app.theme()`'s/`fm._status_bg`'s own readback."""
     monkeypatch.setenv("COLORFGBG", "15;0")  # system starts dark
     fm = FileManager(sample_tree, width=60, height=20)
-    _fg, body_bg_before = fm.app.cell_colors(12, 2)
+    _fg, body_bg_before = fm.app.cell_colors(12, 1)
     _fg, status_bg_before = fm.app.cell_colors(0, 19)
     assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
 
@@ -106,7 +106,7 @@ def test_system_theme_changed_event_repaints_the_body_and_status_bar(sample_tree
 
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
     assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
-    _fg, body_bg_after = fm.app.cell_colors(12, 2)
+    _fg, body_bg_after = fm.app.cell_colors(12, 1)
     _fg, status_bg_after = fm.app.cell_colors(0, 19)
     assert body_bg_after != body_bg_before, "body didn't repaint light"
     assert status_bg_after != status_bg_before, "status bar didn't repaint light"
@@ -128,7 +128,7 @@ def test_system_theme_changed_applies_live_through_the_real_run_loop(sample_tree
     monkeypatch.setenv("COLORFGBG", "15;0")  # system starts dark
     fm = FileManager(sample_tree, width=60, height=20)
     assert fm.app.theme()["background"] == {"r": 30, "g": 30, "b": 30, "a": 255}
-    _fg, body_bg_before = fm.app.cell_colors(12, 2)
+    _fg, body_bg_before = fm.app.cell_colors(12, 1)
     _fg, status_bg_before = fm.app.cell_colors(0, 19)
 
     fm.app.push_event(SYSTEM_THEME_CHANGED_TO_LIGHT)
@@ -137,7 +137,7 @@ def test_system_theme_changed_applies_live_through_the_real_run_loop(sample_tree
     assert still_running
     assert fm.app.theme()["background"] == {"r": 255, "g": 255, "b": 255, "a": 255}
     assert fm._status_bg == {"r": 225, "g": 225, "b": 225, "a": 255}
-    _fg, body_bg_after = fm.app.cell_colors(12, 2)
+    _fg, body_bg_after = fm.app.cell_colors(12, 1)
     _fg, status_bg_after = fm.app.cell_colors(0, 19)
     assert body_bg_after != body_bg_before, "body didn't repaint light"
     assert status_bg_after != status_bg_before, "status bar didn't repaint light"
