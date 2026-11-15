@@ -1,6 +1,7 @@
 """Black-box tests for the menu bar (Finder-parity VISION.md backlog item):
-today just a View menu with Hide/Show Sidebar and Hide/Show Preview, each
-item's own label flipping with the state it toggles. Driven headlessly
+a File menu (New Folder, New Tab -- the same actions the context menu/`t`
+already back) and a View menu (Hide/Show Sidebar, Hide/Show Preview, each
+item's own label flipping with the state it toggles). Driven headlessly
 through `FileManager.step`, same as every other feature tranche -- see
 `app.py`'s "chrome: menu bar" section doc for how little of the open/close/
 Alt-mnemonic/arrow-key interaction this app actually has to handle itself."""
@@ -11,7 +12,15 @@ from conftest import click as _click
 from conftest import find_row as _find_row
 
 from quadraui_files import FileManager
-from quadraui_files.app import ENTER_KEY, MENU_VIEW_PREVIEW_ID, MENU_VIEW_SIDEBAR_ID, _key_event, _menu_bar
+from quadraui_files.app import (
+    ENTER_KEY,
+    MENU_FILE_NEW_FOLDER_ID,
+    MENU_FILE_NEW_TAB_ID,
+    MENU_VIEW_PREVIEW_ID,
+    MENU_VIEW_SIDEBAR_ID,
+    _key_event,
+    _menu_bar,
+)
 
 TAB_KEY = {"Named": "Tab"}
 LEFT_KEY = {"Named": "Left"}
@@ -34,9 +43,46 @@ def _alt(char: str) -> dict:
     }
 
 
-def test_the_menu_bar_shows_the_view_label(sample_tree):
+def test_the_menu_bar_shows_the_file_and_view_labels(sample_tree):
     fm = FileManager(sample_tree)
-    assert "View" in fm.app.screen()
+    screen = fm.app.screen()
+    assert "File" in screen
+    assert "View" in screen
+
+
+def test_alt_f_opens_the_file_menu_with_both_items(sample_tree):
+    fm = FileManager(sample_tree)
+    fm.step(_alt("f"))
+    screen = fm.app.screen()
+    assert "New Folder" in screen
+    assert "New Tab" in screen
+
+
+def test_file_new_folder_creates_one_in_the_browsed_folder(sample_tree):
+    """The exact same action the context menu's own "New Folder" and
+    `cmd+shift+n` already back -- the menu item is one more door to it,
+    not a second implementation."""
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+
+    fm.step(_alt("f"))
+    fm.step({"MenuActivated": MENU_FILE_NEW_FOLDER_ID})
+
+    assert "untitled folder" in [c.name for c in (fm.open[fm.active_tab].children or [])]
+    assert fm.edit_mode == "rename", "should drop straight into an editable name, like Finder"
+
+
+def test_file_new_tab_opens_a_second_tab_on_the_same_folder(sample_tree):
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    assert len(fm.open) == 1
+
+    fm.step(_alt("f"))
+    fm.step({"MenuActivated": MENU_FILE_NEW_TAB_ID})
+
+    assert len(fm.open) == 2
+    assert fm.active_tab == 1
+    assert fm.open[1].path == fm.open[0].path
 
 
 def test_alt_v_opens_the_view_menu_with_both_items(sample_tree):
@@ -66,8 +112,8 @@ def test_choosing_hide_sidebar_hides_it_and_flips_its_own_label(sample_tree):
     # synthesizes `MenuActivated` directly), but real enough in a test to
     # check the built descriptor instead of the live screen for this one.
     label = _menu_bar(sidebar_visible=fm.sidebar_visible, preview_visible=fm.preview_visible)
-    items = label["menu_bar"]["items"][0]["submenu"]
-    sidebar_item = next(i for i in items if i["id"] == MENU_VIEW_SIDEBAR_ID)
+    all_items = [i for menu in label["menu_bar"]["items"] for i in menu["submenu"]]
+    sidebar_item = next(i for i in all_items if i["id"] == MENU_VIEW_SIDEBAR_ID)
     assert sidebar_item["label"]["spans"][0]["text"] == "Show Sidebar"
 
 

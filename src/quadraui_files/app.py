@@ -109,8 +109,9 @@ key focus -- the file list (the default), or the sidebar:
   right-click empty grid   open the context menu for the browsed folder --
     space                   see the right-click paragraph below for why
                             this works but right-clicking a row doesn't, yet
-  Alt+V        open the menu bar's View menu (click works too); arrows
-               move within it, Enter activates, Esc closes
+  Alt+F / Alt+V   open the menu bar's File/View menu (click works too);
+               arrows move within it, Enter activates, Esc closes -- File
+               has New Folder/New Tab (same actions ⌘⇧N/`t` already back)
   q / Escape   quit the real run loops
 
 A right-click on a row would be the natural way to open the context menu,
@@ -1239,13 +1240,15 @@ def _quantise_rows(px: float, line_height: float) -> float:
 
 # --- chrome: menu bar ---------------------------------------------------------
 #
-# Finder has a real menu bar; this app's own `menu_bar` leaf is the closest
-# quadraui has, on every backend -- including macOS, though not quite the
-# way it sounds: `quadraui::macos::menu_bar::draw_menu_bar` rasterises it
-# *inside* the app's own window surface, the same `NativeSurface` paint
-# path `toolbar`/`activity_bar` already used, not a real global `NSMenu`
-# docked to the top of the screen outside the window. Still a real,
-# interactive menu bar in every other sense: open/close, hover-to-switch
+# Finder has a real menu bar; this app's own `menu_bar` leaf is quadraui's
+# equivalent. On macOS, `Backend::install_menu_bar` is *supposed* to hoist
+# it into the real `NSApp.mainMenu` for free -- "every generic caller ...
+# gets this with no macOS-specific call site required" -- but as actually
+# tested through `run_native()`, a `menu_bar` leaf nested inside a `split`
+# (this app's own shape, to pin it to one row) never installs: the system
+# menu bar shows only AppKit's unbundled-script boilerplate, not this
+# app's own items (JDonaghy/quadraui#2560). A real, interactive menu bar
+# in every other sense on the TUI: open/close, hover-to-switch
 # between top-level menus, Alt+<mnemonic-letter> activation (an item's
 # `&` prefix marks which letter -- `&View` underlines "V"), arrow-key
 # navigation within an open dropdown, and Escape-to-close are all handled
@@ -1262,14 +1265,18 @@ def _quantise_rows(px: float, line_height: float) -> float:
 #
 # Pinned to its own 1-line `first_min` the same way the now-removed
 # toolbar was -- see `_render`'s own doc -- above everything else in the
-# window, including the status bar. Only a "View" menu exists so far
-# (Hide/Show Sidebar, Hide/Show Preview, each item's own label flipping
-# with the state it toggles, the way Finder's real "Hide Sidebar"/"Show
-# Sidebar" does -- not a static label plus a `checked` checkmark); File/
-# Edit/Window/Help are natural follow-ups once there's a real action to
-# hang on each one.
+# window, including the status bar. "File" (New Folder, New Tab -- the
+# same actions `_new_folder`/`_open` already back for the context menu/`t`)
+# and "View" (Hide/Show Sidebar, Hide/Show Preview, each item's own label
+# flipping with the state it toggles, the way Finder's real "Hide
+# Sidebar"/"Show Sidebar" does -- not a static label plus a `checked`
+# checkmark) exist so far; Edit/Window/Help are natural follow-ups once
+# there's a real action to hang on each one.
 
 MENU_BAR_ID = "fm:menubar"
+MENU_FILE_ID = "menu:file"
+MENU_FILE_NEW_FOLDER_ID = "file:new_folder"
+MENU_FILE_NEW_TAB_ID = "file:new_tab"
 MENU_VIEW_ID = "menu:view"
 MENU_VIEW_SIDEBAR_ID = "view:sidebar"
 MENU_VIEW_PREVIEW_ID = "view:preview"
@@ -1284,6 +1291,14 @@ def _menu_bar(*, sidebar_visible: bool, preview_visible: bool) -> dict:
         "menu_bar": {
             "id": MENU_BAR_ID,
             "items": [
+                {
+                    "id": MENU_FILE_ID,
+                    "label": "&File",
+                    "submenu": [
+                        {"id": MENU_FILE_NEW_FOLDER_ID, "label": _styled_text("New Folder")},
+                        {"id": MENU_FILE_NEW_TAB_ID, "label": _styled_text("New Tab")},
+                    ],
+                },
                 {
                     "id": MENU_VIEW_ID,
                     "label": "&View",
@@ -2469,8 +2484,14 @@ class FileManager:
     def _on_menu_activated(self, item_id: str) -> None:
         """A `MenuActivated` event: an actual menu-bar item was chosen (not
         a parent whose own click just opens/closes its submenu -- that
-        never reaches the app at all, see `_menu_bar`'s own doc)."""
-        if item_id == MENU_VIEW_SIDEBAR_ID:
+        never reaches the app at all, see `_menu_bar`'s own doc). File >
+        New Folder/New Tab reuse the exact same handlers the context menu
+        and `t` already call -- same action, just one more door to it."""
+        if item_id == MENU_FILE_NEW_FOLDER_ID:
+            self._new_folder()
+        elif item_id == MENU_FILE_NEW_TAB_ID:
+            self._open()
+        elif item_id == MENU_VIEW_SIDEBAR_ID:
             self._toggle_sidebar()
         elif item_id == MENU_VIEW_PREVIEW_ID:
             self._toggle_preview()

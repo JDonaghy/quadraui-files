@@ -59,7 +59,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
 | **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the sidebar and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
-| **Menu bar** | A real menu bar (`Alt+<letter>`/click, arrow nav, Esc) -- today just View > Hide/Show Sidebar, Hide/Show Preview | ✅ TUI; native paints it inside the window, not as a real `NSMenu` (see [known limits](#known-limits)) |
+| **Menu bar** | A real menu bar (`Alt+<letter>`/click, arrow nav, Esc) -- File > New Folder/New Tab, View > Hide/Show Sidebar, Hide/Show Preview | ✅ TUI; broken on native macOS (JDonaghy/quadraui#2560, see [known limits](#known-limits)) |
 
 Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
 the app's own delayed-show/auto-dismiss timers through `QuiAppWaker.post_after`, which
@@ -100,11 +100,19 @@ affected by that gap and already works, opening the same menu with nothing selec
 
 The menu bar is a real, interactive menu bar in every sense that matters —
 open/close, hover-to-switch, `Alt+<letter>` mnemonics, arrow-key navigation, Esc to
-close — but on macOS it's `quadraui::macos::menu_bar::draw_menu_bar` rasterising it
-*inside* the app's own window, not a real global `NSMenu` docked outside it. Open/close
-state is entirely engine-internal; this app never tracks it and never sees anything
-but `MenuActivated` once a real leaf item (not a parent with its own submenu) is
-chosen.
+close — on the TUI. Open/close state is entirely engine-internal; this app never
+tracks it and never sees anything but `MenuActivated` once a real leaf item (not a
+parent with its own submenu) is chosen.
+
+On native macOS, the `install_menu_bar` path is supposed to hoist a `menu_bar` leaf
+into the real `NSApp.mainMenu` for free, with no macOS-specific call site required —
+but as actually tested, a `menu_bar` leaf nested inside a `split` (the shape this app
+uses, to pin it to one row the same way the toolbar used to be) never installs: the
+system menu bar shows only AppKit's own unbundled-script boilerplate (`Python`, File,
+Edit, View, Window, Help — View's own generic `Show Tab Bar`/`Enter Full Screen`, not
+ours), filed as JDonaghy/quadraui#2560. Launching from some terminal emulators (seen
+with Ghostty) hits a separate, broader problem first — the app never activates as the
+foreground process at all (JDonaghy/quadraui#2561, same class of bug as #1333).
 
 The left pane is the host OS's own sidebar (Finder's Favorites/iCloud/Locations on
 macOS, Explorer's Quick access/This PC on Windows, Nautilus's places on Linux), even in
