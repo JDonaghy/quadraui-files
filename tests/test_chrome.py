@@ -149,8 +149,8 @@ def test_system_theme_changed_applies_live_through_the_real_run_loop(sample_tree
 def test_ctrl_f_accelerator_opens_the_search_box(sample_tree):
     fm = FileManager(sample_tree)
     fm.step(CTRL_F_EVENT)
-    assert fm.edit_mode == "filter"
-    assert "Filter" in fm.app.screen()
+    assert fm.edit_mode == "search"  # Finder's Find (#56); `/` is the live filter
+    assert "Search in" in fm.app.screen()
 
 
 def test_f2_accelerator_opens_the_rename_box_for_the_cursored_folder(sample_tree):
@@ -183,17 +183,16 @@ def test_registered_accelerators_are_ignored_while_the_edit_box_is_open(sample_t
     assert "f" not in fm.filter_text
 
 
-def test_typing_a_bare_f_into_the_open_filter_box_is_not_swallowed(sample_tree):
+def test_typing_a_bare_f_into_the_open_search_box_is_not_swallowed(sample_tree):
     """Only the *chord* `ctrl+f`/`cmd+f` is a registered global accelerator
     (see `ACCELERATORS`'s own doc) -- a bare `f` keystroke must still reach
-    the filter box as ordinary typed text once it's open."""
+    the Find box (#56) as ordinary typed text once it's open."""
     fm = FileManager(sample_tree)
-    fm.step(CTRL_F_EVENT)  # open the filter box
-    assert fm.edit_mode == "filter"
+    fm.step(CTRL_F_EVENT)  # open the Find box
+    assert fm.edit_mode == "search"
 
     fm.step(_key_event({"Char": "f"}))
 
-    assert fm.filter_text == "f"
     assert fm.edit_text == "f"
 
 
@@ -214,7 +213,7 @@ def test_accelerator_registration_rejecting_one_chord_does_not_raise(sample_tree
 
     # The other accelerators registered fine despite the one rejection.
     fm.step(CTRL_F_EVENT)
-    assert fm.edit_mode == "filter"
+    assert fm.edit_mode == "search"
 
 
 # --- layout spacing --------------------------------------------------------

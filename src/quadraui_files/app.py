@@ -82,6 +82,10 @@ key focus -- the file list (the default), or the sidebar:
   ⌘C / ^C      copy the selected row to this app's own clipboard
   ⌘V / ^V      paste into the folder being browsed
   ⌘I / ^I      Get Info for the selected row
+  ⌘F / ^F      Find: type a name, Enter opens a search tab listing every
+               match below the browsed folder (or, on macOS, across This
+               Mac via Spotlight -- the tab's address bar toggles), with a
+               Where column; `r` re-runs it, `w` closes it
   /            open the bottom filter box; typing narrows every open
                details table live, Enter closes the box (filter stays
                applied), Esc closes it and clears the filter
@@ -164,12 +168,13 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from stat import filemode
-from typing import Callable, Protocol
+from typing import Callable, Iterable, Iterator, Protocol
 
 from quadraui import InternalError, QuadrauiError, QuiApp
 from quadraui.app.hot_reload import (
@@ -230,6 +235,10 @@ class Node:
     expanded: bool = False
     load_error: bool = False
     load_error_reason: str | None = None  # e.g. "Permission denied", set with load_error
+    # Set only on a search tab's own node (#56): its `children` are the
+    # results, not a directory listing. Read it with `_search_of`, which
+    # also covers a `Node` built before a hot reload added this field.
+    search: "SearchState | None" = field(default=None, repr=False)
 
     def subdirs(self) -> list["Node"]:
         """Loaded child directories in display order (empty if not loaded)."""
@@ -416,6 +425,185 @@ class _FolderSnapshot:
             self.snapshot(path)
             return False
         return _folder_signature(path) != self._signatures[path]
+
+
+# --- search (#56) --------------------------------------------------------------
+#
+# Finder-style search: a search tab whose listing is the result set. A search
+# runs on a daemon thread (`_search_worker`), never in `render()` or the
+# handler, and hands its results over through `SearchState.pending`; the
+# thread posts `SEARCH_WAKE` through the waker and the wake, dispatched on the
+# run loop's own thread, moves them into the tab (`FileManager.
+# _drain_searches`). Two scopes, Finder's own: the folder the search started
+# from (walk its subfolders -- every OS, and what the test suite drives) and
+# "This Mac" (Spotlight's `mdfind`, macOS only). Both match names only,
+# case-insensitively, and skip dotfiles the same way `load_children` does.
+#
+# Results are *detached* `Node`s (`parent is None`): giving each one a real
+# parent chain would mean `_node_for` reading every ancestor directory on the
+# UI thread. Anything that needs the real model node -- navigating into a
+# folder result, rename, trash, Get Info -- resolves it by path
+# (`FileManager._resolve_result`).
+
+SEARCH_WAKE = "quadraui_files.search"
+SEARCH_SCOPE_FOLDER = "folder"
+SEARCH_SCOPE_MAC = "mac"
+SEARCH_SCOPE_ACTION_PREFIX = "fm:search:scope:"
+SEARCH_RESULT_CAP = 1000  # past this many hits the search stops, like a capped Finder window
+_SEARCH_POST_INTERVAL = 0.15  # seconds between wakes while results stream in
+
+
+class SearchState:
+    """One running (or finished) search. The worker thread only ever touches
+    `pending`/`done`/`capped`/`error` (under `lock`) and reads `cancel`; the
+    run-loop thread drains `pending` into the tab's `node.children` and sets
+    `finished` once it has drained a `done` search, which tells the worker to
+    stop re-posting its final wake."""
+
+    def __init__(self, query: str, scope: str, root: Node, node: Node) -> None:
+        self.query = query
+        self.scope = scope
+        self.root = root  # the folder the search was started from
+        self.node = node  # the search tab's own node
+        self.lock = threading.Lock()
+        self.pending: list[Node] = []
+        self.done = False
+        self.capped = False
+        self.error: str | None = None
+        self.finished = False
+        self.cancel = threading.Event()
+
+
+def _search_of(node: Node | None) -> SearchState | None:
+    """`node`'s search, if it is a search tab's node."""
+    return getattr(node, "search", None)
+
+
+def _result_node(path: Path) -> Node | None:
+    """A detached result row for `path` (see this section's doc), or `None`
+    if it vanished between being found and being stat'ed."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    is_dir = os.path.isdir(path)
+    return Node(
+        name=path.name,
+        path=path,
+        is_dir=is_dir,
+        size_bytes=None if is_dir else st.st_size,
+        mtime=st.st_mtime,
+    )
+
+
+def _walk_matches(root: Path, query: str) -> Iterator[Path]:
+    """Every non-dot entry below `root` whose name contains `query`
+    (case-insensitive), breadth of each folder before its subfolders. Dot
+    folders aren't descended into, symlinked folders aren't followed, and an
+    unreadable folder is skipped rather than ending the search."""
+    q = query.lower()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        base = Path(dirpath)
+        for name in [*dirnames, *sorted(f for f in filenames if not f.startswith("."))]:
+            if q in name.lower():
+                yield base / name
+
+
+def _mdfind(query: str) -> Iterator[str]:
+    """Spotlight's name search (`mdfind -name`), one path per line as it
+    streams. Closing the generator early kills `mdfind`."""
+    proc = subprocess.Popen(
+        ["mdfind", "-name", query],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            yield line.rstrip("\n")
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def default_spotlight() -> Callable[[str], Iterable[str]] | None:
+    """The "This Mac" search runner on this host: `mdfind` on macOS, `None`
+    (no This Mac scope offered) anywhere else."""
+    if sys.platform == "darwin" and shutil.which("mdfind"):
+        return _mdfind
+    return None
+
+
+def _search_worker(state: SearchState, waker, spotlight: Callable[[str], Iterable[str]] | None) -> None:
+    """The search thread: find matches, hand them over in batches, and keep
+    posting `SEARCH_WAKE` until the run loop has drained the final batch --
+    the same re-post-until-acknowledged safety net `_fs_watch_loop`'s doc
+    gives, for a backend that drops or coalesces a wake."""
+    if state.scope == SEARCH_SCOPE_MAC and spotlight is not None:
+        source = (Path(p) for p in spotlight(state.query) if p)
+    else:
+        source = _walk_matches(state.root.path, state.query)
+    count = 0
+    last_post = 0.0
+    try:
+        for path in source:
+            if state.cancel.is_set():
+                return
+            if any(part.startswith(".") for part in path.parts):
+                continue  # Spotlight returns dotfiles; the app never lists them
+            node = _result_node(path)
+            if node is None:
+                continue
+            with state.lock:
+                state.pending.append(node)
+            count += 1
+            if count >= SEARCH_RESULT_CAP:
+                with state.lock:
+                    state.capped = True
+                break
+            now = time.monotonic()
+            if now - last_post >= _SEARCH_POST_INTERVAL:
+                last_post = now
+                waker.post(SEARCH_WAKE)
+    except Exception as exc:  # a failed search reports itself, it doesn't kill the app
+        with state.lock:
+            state.error = str(exc) or type(exc).__name__
+    finally:
+        close = getattr(source, "close", None)
+        if close is not None:
+            close()  # stops `mdfind` early on a cap or a cancel
+        with state.lock:
+            state.done = True
+    for _ in range(40):  # ~10s of re-posts at most
+        if state.finished or state.cancel.is_set():
+            return
+        waker.post(SEARCH_WAKE)
+        state.cancel.wait(0.25)
+
+
+def _where_text(path: Path, root: Path | None = None, root_label: str = "") -> str:
+    """The search results' Where column: the folder `path` is in. Under the
+    folder the search started from (`root`), relative to it (that folder
+    itself shows as `root_label`), so a long shared prefix doesn't push the
+    part that tells results apart off the end of the column; otherwise with
+    the home folder shortened to `~` the way `_window_title` does it."""
+    parent = path.parent
+    if root is not None and _is_under(parent, root):
+        rel = parent.relative_to(root)
+        return root_label if rel == Path(".") else rel.as_posix()
+    home = Path.home()
+    if parent == home:
+        return "~"
+    try:
+        return f"~/{parent.relative_to(home)}"
+    except ValueError:
+        return str(parent)
+
+
+def _is_under(path: Path, ancestor: Path) -> bool:
+    return path == ancestor or ancestor in path.parents
 
 
 def _reparent_paths(node: Node) -> None:
@@ -1134,7 +1322,12 @@ def _kind_sort_key(node: Node) -> tuple[bool, str, str]:
     return (not node.is_dir, _human_kind(node).lower(), node.name.lower())
 
 
-_COLUMN_SORT_KEYS = {0: _sort_key, 1: _size_sort_key, 2: _mtime_sort_key, 3: _kind_sort_key}
+def _where_sort_key(node: Node) -> tuple[str, str]:
+    """A search result's Where column (#56): its folder, then its name."""
+    return (str(node.path.parent).lower(), node.name.lower())
+
+
+_COLUMN_SORT_KEYS = {0: _sort_key, 1: _size_sort_key, 2: _mtime_sort_key, 3: _kind_sort_key, 4: _where_sort_key}
 
 
 def _sort_children(children: list[Node], col: int, reverse: bool) -> list[Node]:
@@ -1161,6 +1354,8 @@ def details_table(
     nerd_fonts_enabled: bool = False,
     column_overrides: list[float | None] | None = None,
     tag_color_for: Callable[[Node], str | None] | None = None,
+    where_for: Callable[[Node], str] | None = None,
+    empty_note: str | None = None,
 ) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
     content subtree of tab `index`. `children` is the rows' display order
@@ -1194,7 +1389,10 @@ def details_table(
     doesn't care about tags -- when given, it leads the Name cell with
     `_tag_dot_span`'s colored dot for whichever child carries a Finder tag,
     same no-op-when-`None`-per-row story `_NullTagReader` already gives a
-    real caller on a platform with no tags to show."""
+    real caller on a platform with no tags to show. `where_for` (#56) adds
+    a fifth, Where column -- a search tab's results come from many folders
+    -- and `empty_note` replaces the "(empty folder)" placeholder (a search
+    with no hits isn't an empty folder)."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
@@ -1202,6 +1400,8 @@ def details_table(
         {"title": "Modified", "width": {"Flex": 1.5}, "align": "Left"},
         {"title": "Kind", "width": {"Flex": 1.2}, "align": "Left"},
     ]
+    if where_for is not None:
+        columns.append({"title": "Where", "width": {"Flex": 2.0}, "align": "Left"})
     if 0 <= sort_col < len(columns):
         arrow = "▼" if sort_reverse else "▲"
         columns[sort_col] = {**columns[sort_col], "title": f"{columns[sort_col]['title']} {arrow}"}
@@ -1217,9 +1417,11 @@ def details_table(
         elif all_children:
             notes = ["(no matches)"]
         else:
-            notes = ["(empty folder)"]
+            notes = [empty_note or "(empty folder)"]
         blank = _styled_text("")
-        rows = [{"cells": [_styled_text(n), blank, blank, blank], "decoration": "Muted"} for n in notes]
+        rows = [
+            {"cells": [_styled_text(n), *[blank] * (len(columns) - 1)], "decoration": "Muted"} for n in notes
+        ]
     else:
         rows = []
         for child in shown:
@@ -1242,16 +1444,10 @@ def details_table(
             dot = _tag_dot_span(tag_color_for(child)) if tag_color_for is not None else None
             name_spans = [dot] if dot is not None else []
             name_spans.append({"text": name, "fg": None, "bg": None})
-            rows.append(
-                {
-                    "cells": [
-                        {"spans": name_spans},
-                        _styled_text(size),
-                        _styled_text(modified),
-                        _styled_text(kind),
-                    ]
-                }
-            )
+            cells = [{"spans": name_spans}, _styled_text(size), _styled_text(modified), _styled_text(kind)]
+            if where_for is not None:
+                cells.append(_styled_text(where_for(child)))
+            rows.append({"cells": cells})
 
     return {
         "id": table_id,
@@ -1588,7 +1784,8 @@ def _quantise_rows(px: float, line_height: float) -> float:
 # window, including the status bar. Four menus so far, each wired to
 # existing actions rather than new ones invented to fill a slot:
 #   File   New Folder, New Tab -- `_new_folder`/`_open`, already behind
-#          the context menu/`t`.
+#          the context menu/`t`. Find… -- `_start_search` (#56), also
+#          `cmd+f`/`ctrl+f`.
 #   Edit   Copy, Paste -- `_copy`/`_paste`, already behind the context
 #          menu/`cmd+c`+`cmd+v`. Paste is `disabled` (greyed, not hidden --
 #          unlike the context menu's own Paste, which only appears at all
@@ -1614,6 +1811,7 @@ MENU_BAR_ID = "fm:menubar"
 MENU_FILE_ID = "menu:file"
 MENU_FILE_NEW_FOLDER_ID = "file:new_folder"
 MENU_FILE_NEW_TAB_ID = "file:new_tab"
+MENU_FILE_FIND_ID = "file:find"
 MENU_EDIT_ID = "menu:edit"
 MENU_EDIT_COPY_ID = "edit:copy"
 MENU_EDIT_PASTE_ID = "edit:paste"
@@ -1639,6 +1837,7 @@ def _menu_bar(*, sidebar_visible: bool, preview_visible: bool, has_clipboard: bo
                     "submenu": [
                         {"id": MENU_FILE_NEW_FOLDER_ID, "label": _styled_text("New Folder")},
                         {"id": MENU_FILE_NEW_TAB_ID, "label": _styled_text("New Tab")},
+                        {"id": MENU_FILE_FIND_ID, "label": _styled_text("Find…")},
                     ],
                 },
                 {
@@ -1804,8 +2003,10 @@ def _status_colors(dark: bool) -> tuple[dict, dict, dict]:
 ACCELERATORS = [
     {"id": "fm:accel:rename", "binding": {"Literal": "F2"}, "scope": "Global", "label": "Rename"},
     {"id": "fm:accel:delete", "binding": {"Literal": "Delete"}, "scope": "Global", "label": "Move to Trash"},
-    {"id": "fm:accel:search", "binding": {"Literal": "ctrl+f"}, "scope": "Global", "label": "Search"},
-    {"id": "fm:accel:search_cmd", "binding": {"Literal": "cmd+f"}, "scope": "Global", "label": "Search"},
+    # Finder's Find (#56): a search tab over the folder's subfolders. The
+    # `/` key is still the live filter over the folder on screen.
+    {"id": "fm:accel:search", "binding": {"Literal": "ctrl+f"}, "scope": "Global", "label": "Find"},
+    {"id": "fm:accel:search_cmd", "binding": {"Literal": "cmd+f"}, "scope": "Global", "label": "Find"},
     # Finder's own New Folder chord is cmd+shift+n; Explorer's and
     # Nautilus's is ctrl+shift+n -- both registered, same dual-binding
     # pattern as search above, so either host's muscle memory works.
@@ -2101,6 +2302,7 @@ class FileManager:
         *,
         sections: list[PlaceSection] | None = None,
         tag_reader: TagReader | None = None,
+        spotlight: Callable[[str], Iterable[str]] | None | object = ...,
     ):
         """Open on `root_path` (default: the home folder, as Finder and
         Explorer do). `sections` overrides the host OS's own sidebar places
@@ -2108,7 +2310,11 @@ class FileManager:
         overrides `TAG_READER` (#54) -- a test passes its own stub, since
         there is no real Finder xattr to read on the box the suite runs
         on; a real run never passes one, picking up the host's own
-        capability (`_MacTagReader` on macOS, `_NullTagReader` elsewhere)."""
+        capability (`_MacTagReader` on macOS, `_NullTagReader` elsewhere).
+        `spotlight` (#56) is the "This Mac" search runner, `query -> paths`:
+        left out, the host's own (`default_spotlight`, `mdfind` on macOS);
+        `None` offers no This Mac scope; a test passes a stub."""
+        self._spotlight = default_spotlight() if spotlight is ... else spotlight
         self.sections = default_sections() if sections is None else sections
         self._tag_reader: TagReader = TAG_READER if tag_reader is None else tag_reader
         # Hides the whole tag-color picker (Get Info's buttons, the context
@@ -2412,7 +2618,8 @@ class FileManager:
         rather than tracking `self.cursor` itself, so this fires exactly
         when the *displayed* title would actually change (not, e.g., on
         every keystroke that leaves the cursor on the same node)."""
-        title = _window_title(self.cursor.path)
+        search = _search_of(self.cursor)
+        title = f"Search: {search.query} — quadraui-files" if search is not None else _window_title(self.cursor.path)
         if title == self._title_cache:
             return
         self._title_cache = title
@@ -2490,6 +2697,8 @@ class FileManager:
 
     def _sidebar_selected_index(self, entries: list[PlaceSection | Place]) -> int | None:
         """Row index of the place the active tab is showing, if it is one."""
+        if _search_of(self.cursor) is not None:
+            return None  # a search tab shows results, not its starting folder
         here = self.cursor.path
         for i, entry in enumerate(entries):
             if isinstance(entry, Place) and entry.path == here:
@@ -2820,9 +3029,11 @@ class FileManager:
         if node is None:
             selected = self.selected_file
             if selected is not None and selected.is_dir and selected in (self.cursor.children or ()):
-                node = selected
+                node = self._resolve_result(selected)
+                if node is None:
+                    return
             else:
-                node = self.cursor
+                node = self._search_root()
         if not node.is_dir:
             self.message = f"{node.name} ({_human_size(node.size_bytes)})"
             return
@@ -2830,6 +3041,10 @@ class FileManager:
 
     def _refresh(self) -> None:
         node = self.cursor
+        search = _search_of(node)
+        if search is not None:
+            self._run_search(node, search.query, search.scope, search.root)
+            return
         stale_paths = {child.path for child in node.children or ()}
         node.children = None
         ensure_loaded(node)
@@ -2854,6 +3069,7 @@ class FileManager:
         if len(self.open) == 1:
             self.message = "the last tab stays open"
             return
+        self._cancel_searches_in([self.open[index], *self.back[index], *self.forward[index]])
         del self.open[index], self.back[index], self.forward[index]
         if self.active_tab > index or self.active_tab >= len(self.open):
             self.active_tab = max(0, self.active_tab - 1)
@@ -2890,6 +3106,8 @@ class FileManager:
             self._new_folder()
         elif item_id == MENU_FILE_NEW_TAB_ID:
             self._open()
+        elif item_id == MENU_FILE_FIND_ID:
+            self._start_search()
         elif item_id == MENU_EDIT_COPY_ID:
             self._copy(self._delete_candidate())
         elif item_id == MENU_EDIT_PASTE_ID:
@@ -2975,6 +3193,8 @@ class FileManager:
         check is defensive, not expected to ever fail."""
         if 0 <= col < len(self.column_overrides):
             self.column_overrides[col] = width
+        elif col == len(self.column_overrides):
+            self._where_width = width  # a search tab's own Where column (#56)
 
     def _select_detail(self, idx: int) -> None:
         """A details-table row was *selected* (a single click, or Up/Down
@@ -3007,7 +3227,9 @@ class FileManager:
         self.table_focus = True
         child = children[idx]
         if child.is_dir:
-            self._navigate(child)  # Explorer: open a folder in place
+            target = self._resolve_result(child)  # a search result's real folder
+            if target is not None:
+                self._navigate(target)  # Explorer: open a folder in place
         else:
             self._set_selected_file(child)
             self.message = f"opening {child.name} ({_human_size(child.size_bytes)})"
@@ -3061,6 +3283,133 @@ class FileManager:
             else:
                 self.message = "already at the top"
 
+    # --- search (#56; see the module-level search section's own doc) --------
+
+    def _search_root(self) -> Node:
+        """The folder a new search looks through: the folder on screen, or
+        the active search tab's own starting folder."""
+        search = _search_of(self.cursor)
+        return search.root if search is not None else self.cursor
+
+    def _start_search(self) -> None:
+        """Find (`cmd+f`/`ctrl+f`, File > Find…): open the bottom box for a
+        search query. From a search tab it's seeded with that search's query,
+        and committing it re-runs the search in place (Finder edits the
+        search you're looking at rather than stacking a new window)."""
+        search = _search_of(self.cursor)
+        self.edit_mode = "search"
+        self.edit_text = search.query if search is not None else ""
+
+    def _commit_search(self, query: str) -> None:
+        query = query.strip()
+        if not query:
+            return
+        search = _search_of(self.cursor)
+        if search is not None:
+            self._run_search(self.cursor, query, search.scope, search.root)
+            return
+        root = self.cursor
+        node = Node(name=query, path=root.path, is_dir=True, children=[])
+        self._new_tab(node)
+        self._run_search(node, query, SEARCH_SCOPE_FOLDER, root)
+
+    def _run_search(self, node: Node, query: str, scope: str, root: Node) -> None:
+        """(Re)start the search shown by `node`'s tab: cancel whatever search
+        it was running, clear its results, and start a worker thread."""
+        old = _search_of(node)
+        if old is not None:
+            old.cancel.set()
+        spotlight = getattr(self, "_spotlight", None)  # absent on an instance from before a hot reload
+        if scope == SEARCH_SCOPE_MAC and spotlight is None:
+            scope = SEARCH_SCOPE_FOLDER
+        state = SearchState(query, scope, root, node)
+        node.search = state
+        node.name = query
+        node.path = root.path
+        node.children = []
+        if self.selected_file is not None and self.cursor is node:
+            self._set_selected_file(None)
+        threading.Thread(
+            target=_search_worker,
+            args=(state, self.waker, spotlight),
+            name="quadraui-files-search",
+            daemon=True,
+        ).start()
+
+    def _set_search_scope(self, scope: str) -> None:
+        """A click on the search tab's This Mac / "<folder>" toggle."""
+        search = _search_of(self.cursor)
+        if search is None or search.scope == scope:
+            return
+        self._run_search(self.cursor, search.query, scope, search.root)
+
+    def _live_searches(self) -> list[SearchState]:
+        """Every search a tab can still show: the open ones, and any a tab's
+        Back/Forward history still holds."""
+        states: list[SearchState] = []
+        for stack in [self.open, *self.back, *self.forward]:
+            for folder in stack:
+                search = _search_of(folder)
+                if search is not None and search not in states:
+                    states.append(search)
+        return states
+
+    def _drain_searches(self) -> None:
+        """`SEARCH_WAKE`: move every search's pending results into its tab,
+        on the run loop's own thread."""
+        for search in self._live_searches():
+            with search.lock:
+                batch, search.pending = search.pending, []
+                done = search.done
+            if batch:
+                search.node.children = [*(search.node.children or []), *batch]
+            if done:
+                search.finished = True
+
+    def _cancel_searches_in(self, folders: Iterable[Node]) -> None:
+        for folder in folders:
+            search = _search_of(folder)
+            if search is not None:
+                search.cancel.set()
+
+    def _resolve_result(self, node: Node | None) -> Node | None:
+        """The real model node behind a row on the active tab: a search
+        result is resolved by path (see the search section's doc), anything
+        else is already real. `None` (with a message) for a result whose
+        file has since gone."""
+        if node is None or _search_of(self.cursor) is None or node is self.cursor:
+            return node
+        if not node.path.exists():
+            self.message = f"{node.name} is no longer there"
+            return None
+        return self._node_for(node.path)
+
+    def _search_results_moved(self, old: Path, new: Path | None) -> None:
+        """Keep search results in step with a rename (`new`) or a trash
+        (`new is None`) of `old`, done from a search tab or anywhere else."""
+        for search in self._live_searches():
+            kept: list[Node] = []
+            for result in search.node.children or ():
+                if not _is_under(result.path, old):
+                    kept.append(result)
+                elif new is not None:
+                    result.path = new / result.path.relative_to(old)
+                    result.name = result.path.name
+                    kept.append(result)
+            search.node.children = kept
+        if new is None and self.selected_file is not None and _is_under(self.selected_file.path, old):
+            self._set_selected_file(None)
+
+    def _search_status(self, search: SearchState) -> str:
+        found = len(search.node.children or ())
+        if search.error is not None:
+            return f"search failed: {search.error}"
+        if not search.finished:
+            return f"Searching… {found} found"
+        if search.capped:
+            return f"{found} found (stopped at {SEARCH_RESULT_CAP})"
+        return f"{found} found"
+
     # --- file actions: delete/trash, open, reveal, context menu -------------
     #
     # Every overlay/OS call below goes through `self.actions`, the deferred
@@ -3092,7 +3441,7 @@ class FileManager:
         is never the target (contrast New Folder/Paste, which always act on
         it deliberately -- see `_new_folder`/`_paste`)."""
         if self.selected_file in (self.cursor.children or ()):
-            return self.selected_file
+            return self._resolve_result(self.selected_file)
         return None
 
     def _protected(self, node: Node) -> bool:
@@ -3194,6 +3543,8 @@ class FileManager:
         was_renaming = self.edit_mode == "rename"
         if was_renaming:
             self._rename(self.rename_target, self.edit_text)
+        elif self.edit_mode == "search":
+            self._commit_search(self.edit_text)
         self.edit_mode = None
         self.rename_target = None
         self.edit_text = ""
@@ -3239,11 +3590,13 @@ class FileManager:
             if not same_file:
                 self.message = f'"{new_name}" already exists'
                 return
+        old_path = node.path
         try:
             node.path.rename(new_path)
         except (OSError, ValueError) as exc:
             self.message = f"rename failed: {exc}"
             return
+        self._search_results_moved(old_path, new_path)
         node.path = new_path
         node.name = new_name
         _reparent_paths(node)
@@ -3261,6 +3614,9 @@ class FileManager:
         inline rename immediately, same as a real Finder/Explorer/Nautilus
         new folder drops you straight into an editable name."""
         parent = self.cursor
+        if _search_of(parent) is not None:
+            self.message = "can't create a folder in search results"
+            return
         if parent.load_error:
             self.message = f"can't create a folder here: {parent.load_error_reason or 'unreadable'}"
             return
@@ -3331,6 +3687,9 @@ class FileManager:
             self._clipboard = None
             return
         parent = self.cursor
+        if _search_of(parent) is not None:
+            self.message = "can't paste into search results"
+            return
         if parent.load_error:
             self.message = f"can't paste here: {parent.load_error_reason or 'unreadable'}"
             return
@@ -3510,7 +3869,7 @@ class FileManager:
         context menu has, and only appears at all while `self._tags_supported`
         -- hidden on Windows/Linux, same "no equivalent metadata" story
         `_NullTagReader` is for."""
-        target = node or self.cursor
+        target = node or self._search_root()
         self._menu_target = target
         items = [
             {"id": "open", "label": _styled_text("Open")},
@@ -3695,6 +4054,7 @@ class FileManager:
             self.forward[i] = [f for f in self.forward[i] if not gone(f)]
         if self.selected_file is node:
             self._set_selected_file(None)
+        self._search_results_moved(node.path, None)
 
     def _remember(self, node: Node) -> None:
         """Put `node` back into the model after a restore, in display order.
@@ -3969,6 +4329,8 @@ class FileManager:
             if watcher is None:
                 continue
             try:
+                if _search_of(self.cursor) is not None:
+                    continue  # a search tab's listing isn't a folder to watch
                 changed = watcher.changed(self.cursor.path)
             except Exception:
                 continue
@@ -3980,6 +4342,8 @@ class FileManager:
         the last check, else `False`. Needs `enable_fs_watch()` first."""
         if self._fw_watcher is None:
             raise RuntimeError("enable_fs_watch() has not been called")
+        if _search_of(self.cursor) is not None:
+            return False
         path = self.cursor.path
         if not self._fw_watcher.changed(path):
             return False
@@ -3991,7 +4355,11 @@ class FileManager:
 
     def _folder_label(self, node: Node) -> str:
         """Display name for a folder: its own name, or for a filesystem root
-        the sidebar's name for it ("Macintosh HD") when there is one."""
+        the sidebar's name for it ("Macintosh HD") when there is one. A
+        search tab is named for its query, the way Finder titles one."""
+        search = _search_of(node)
+        if search is not None:
+            return f"Search: {search.query}"
         if node.parent is None:
             for section in self.sections:
                 for place in section.places:
@@ -4015,7 +4383,31 @@ class FileManager:
         its segments are the one clickable-text-run primitive there is
         (a real breadcrumbs primitive: JDonaghy/quadraui#2452) --
         each crumb's `action_id` comes back as a `SegmentClicked`. Only the
-        active tab's crumbs are live; the others aren't on screen."""
+        active tab's crumbs are live; the others aren't on screen. A search
+        tab shows its scope toggle here instead (#56): Finder's own
+        "Search: This Mac | <folder>" bar, each scope a clickable segment."""
+        search = _search_of(folder)
+        if search is not None:
+            scopes = [(SEARCH_SCOPE_FOLDER, f'"{self._folder_label(search.root)}"')]
+            if getattr(self, "_spotlight", None) is not None:
+                scopes.insert(0, (SEARCH_SCOPE_MAC, "This Mac"))
+            segments = [self._segment(" Search: ")]
+            for n, (scope, label) in enumerate(scopes):
+                if n:
+                    segments.append(self._segment("|"))
+                active = scope == search.scope
+                segments.append(
+                    self._segment(
+                        f" {label} ",
+                        accent=active,
+                        bold=active,
+                        action_id=None if active else f"{SEARCH_SCOPE_ACTION_PREFIX}{scope}",
+                    )
+                )
+            return {
+                "id": f"fm:addr:{index}",
+                "status_bar": {"id": f"fm:addr:{index}", "left_segments": segments, "right_segments": []},
+            }
         chain: list[Node] = []
         node: Node | None = folder
         while node is not None:
@@ -4066,6 +4458,7 @@ class FileManager:
                 if is_active and self.selected_file in children and not self.edit_mode
                 else None
             )
+            search = _search_of(folder)
             return details_table(
                 folder,
                 i,
@@ -4075,8 +4468,22 @@ class FileManager:
                 selected_idx=selected_idx,
                 has_focus=is_active and self.table_focus and not self.edit_mode,
                 nerd_fonts_enabled=self._nerd_fonts_enabled,
-                column_overrides=self.column_overrides,
+                column_overrides=(
+                    self.column_overrides
+                    if search is None
+                    else [*self.column_overrides, getattr(self, "_where_width", None)]
+                ),
                 tag_color_for=self._tag_color_for,
+                where_for=(
+                    None
+                    if search is None
+                    else (
+                        lambda node, root=search.root, label=self._folder_label(search.root): _where_text(
+                            node.path, root.path, label
+                        )
+                    )
+                ),
+                empty_note=None if search is None else ("(searching…)" if not search.finished else "(no results)"),
             )
 
         header_rows = self._chrome_line_height / self._line_height
@@ -4260,7 +4667,10 @@ class FileManager:
         """The outer split's bottom pane: a live status bar showing the current
         folder, its item count, the open-tab summary, and any transient hint."""
         node = self.cursor
-        if node.children is None:
+        search = _search_of(node)
+        if search is not None:
+            count_text = self._search_status(search)
+        elif node.children is None:
             count_text = "unopened"
         else:
             count_text = f"{len(node.children)} items"
@@ -4292,7 +4702,10 @@ class FileManager:
         """The outer split's bottom pane while the filter/rename box is
         open: a live text_input showing its label and buffer, swapped in
         for the status bar."""
-        label = "Filter" if self.edit_mode == "filter" else "Rename"
+        if self.edit_mode == "search":
+            label = f"Search in {self._folder_label(self._search_root())}"
+        else:
+            label = "Filter" if self.edit_mode == "filter" else "Rename"
         text = f"{label}: {self.edit_text}"
         return {
             "id": "fm:edit",
@@ -4423,6 +4836,9 @@ class FileManager:
         if isinstance(event, dict) and event.get("User") == HOT_RELOAD_WAKE:
             if self._hr_watcher is not None:
                 self.reload_if_changed()
+            return
+        if isinstance(event, dict) and event.get("User") == SEARCH_WAKE:
+            self._drain_searches()
             return
         if isinstance(event, dict) and event.get("User") == FS_WATCH_WAKE:
             if self._fw_watcher is not None:
@@ -4593,6 +5009,8 @@ class FileManager:
                 clicked_id = activation["SegmentClicked"]["id"]
                 if clicked_id == PREVIEW_HEADER_CLOSE_ACTION:
                     self.preview_visible = False
+                elif clicked_id.startswith(SEARCH_SCOPE_ACTION_PREFIX):
+                    self._set_search_scope(clicked_id[len(SEARCH_SCOPE_ACTION_PREFIX):])
                 elif clicked_id.startswith(CRUMB_ACTION_PREFIX):
                     self._on_crumb(int(clicked_id[len(CRUMB_ACTION_PREFIX):]))
         elif "SplitDividerDragged" in event:
@@ -4697,7 +5115,7 @@ class FileManager:
         elif accel_id == "fm:accel:delete":
             self._request_delete(self._delete_candidate())
         elif accel_id in ("fm:accel:search", "fm:accel:search_cmd"):
-            self._start_filter()
+            self._start_search()
         elif accel_id in ("fm:accel:new_folder", "fm:accel:new_folder_cmd"):
             self._new_folder()
         elif accel_id == "fm:accel:duplicate":
