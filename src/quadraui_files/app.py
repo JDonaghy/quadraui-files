@@ -154,6 +154,7 @@ without any Python code needing to run between events.
 
 from __future__ import annotations
 
+import ctypes
 import math
 import mimetypes
 import os
@@ -591,9 +592,23 @@ TAG_COLORS: tuple[TagColor, ...] = (
 TAG_COLOR_NAMES: tuple[str, ...] = tuple(c.name for c in TAG_COLORS)
 _TAG_RGB: dict[str, tuple[int, int, int]] = {c.name: c.rgb for c in TAG_COLORS}
 # Finder's own legacy label index (1-7, written as the trailing digit of the
-# `"<name>\n<index>"` tag string `_MacTagReader` reads/writes) -- order
-# matches the swatch row Finder's own Tags picker shows, not alphabetical.
-_TAG_COLOR_LABEL_INDEX: dict[str, int] = {c.name: i + 1 for i, c in enumerate(TAG_COLORS)}
+# `"<name>\n<index>"` tag string `_MacTagReader` reads/writes) -- this is
+# `kMDItemFSLabel`'s own numbering, NOT the swatch order `TAG_COLORS` lists
+# above (that order is only this app's own picker's/Finder's Tags-picker
+# *display* row). Needs reconfirming on a real Mac before shipping (tag a
+# file with each of the 7 colors in Finder, `xattr -px
+# com.apple.metadata:_kMDItemUserTags` on it, and compare the trailing
+# digit against this table) -- no macOS box is available in this
+# environment to do that firsthand.
+_TAG_COLOR_LABEL_INDEX: dict[str, int] = {
+    "Gray": 1,
+    "Green": 2,
+    "Purple": 3,
+    "Blue": 4,
+    "Yellow": 5,
+    "Red": 6,
+    "Orange": 7,
+}
 _TAG_DOT_GLYPH = "●"
 
 
@@ -640,57 +655,119 @@ class _NullTagReader:
 
 
 _KMD_USER_TAGS_XATTR = "com.apple.metadata:_kMDItemUserTags"
+_XATTR_BIN = "/usr/bin/xattr"  # absolute, so a Homebrew/pip `xattr` on $PATH can't shadow the system one
+
+
+def _darwin_getxattr(path: Path, name: str) -> bytes | None:
+    """Reads extended attribute `name` off `path` in-process, via libSystem's
+    own `getxattr(2)` through `ctypes` -- `_tag_color_for` calls this once
+    per row on every render (`render()` rebuilds the tree every frame), so
+    an `/usr/bin/xattr` subprocess spawn per row would visibly stall a
+    large folder's first paint. CPython's own `os.getxattr`/`os.setxattr`
+    aren't built on Darwin (`posixmodule.c`'s `HAVE_XATTR` guard, which its
+    own `configure` never defines there), so `ctypes` against the libc
+    already loaded into this process is the in-process route, not a
+    subprocess at all -- no `timeout=` to pick here, there's no process to
+    hang. Returns `None` for "no such attribute" and for any other OS-level
+    failure alike (a missing/unreadable file, say) -- both mean "nothing to
+    show", same as the old subprocess path's blanket `except`."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.getxattr.restype = ctypes.c_ssize_t
+    libc.getxattr.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_uint32,
+        ctypes.c_int,
+    ]
+    raw_path = os.fsencode(str(path))
+    raw_name = name.encode("utf-8")
+    size = libc.getxattr(raw_path, raw_name, None, 0, 0, 0)
+    if size < 0:
+        return None
+    buf = ctypes.create_string_buffer(size)
+    size = libc.getxattr(raw_path, raw_name, buf, size, 0, 0)
+    if size < 0:
+        return None
+    return buf.raw[:size]
+
+
+def _mac_user_tags(path: Path) -> list[str]:
+    """Every raw `"<name>\\n<label-index>"` (or plain free-text) entry of
+    `path`'s own `_kMDItemUserTags`, or `[]` when it has none / isn't
+    readable. Shared by `_MacTagReader.get` (which only cares about the one
+    entry naming a color) and `.set` (which has to keep every *other*
+    entry untouched -- see its own doc)."""
+    raw = _darwin_getxattr(path, _KMD_USER_TAGS_XATTR)
+    if raw is None:
+        return []
+    try:
+        tags = plistlib.loads(raw)
+    except (ValueError, plistlib.InvalidFileException, TypeError):
+        return []
+    if not isinstance(tags, list):
+        # A plist that decodes to something other than an array -- not
+        # what Finder itself ever writes, but a third-party tool's xattr
+        # is input this app doesn't control; degrade to "no tags" rather
+        # than let a non-iterable take the render frame down.
+        return []
+    return [tag for tag in tags if isinstance(tag, str)]
 
 
 class _MacTagReader:
     """The real macOS `TagReader`: Finder's own `_kMDItemUserTags` xattr, a
     binary-plist array of `"<name>\\n<label-index>"` strings -- the exact
     shape Finder itself reads/writes, so a tag set here shows up in a real
-    Finder window on the same file, and vice versa. Goes through the
-    `/usr/bin/xattr` CLI rather than `os.getxattr`/`os.setxattr`: CPython's
-    `posixmodule.c` only builds those under `HAVE_XATTR`, which its own
-    `configure` never defines on Darwin, so there is no in-process call to
-    reach for here instead -- a plain OS call either way, per this issue's
-    own doc, just not Python's own `os` module's version of one. Keeps (and
-    writes) only the first tag that names one of Finder's 7 built-in
-    colors -- a file can carry other, free-text tags too, which aren't a
-    color this app's picker offers and are left untouched by both `get()`
-    and `set()`."""
+    Finder window on the same file, and vice versa. Reads happen in-process
+    (`_darwin_getxattr`, no subprocess spawn -- see its own doc); writes
+    still shell out to `/usr/bin/xattr`, since there is no in-process
+    `setxattr` to reach for either (same `HAVE_XATTR` gap), and a write is
+    one per user action rather than one per rendered row. Keeps (and
+    writes) only the one tag that names one of Finder's 7 built-in colors
+    -- a file can carry other, free-text tags too, which aren't a color
+    this app's picker offers, and both `get()` and `set()` leave those
+    alone: `set()` reads the existing array first and only replaces the
+    color entry, rather than overwriting the whole attribute."""
 
     def get(self, path: Path) -> str | None:
-        try:
-            result = subprocess.run(
-                ["xattr", "-p", "-x", _KMD_USER_TAGS_XATTR, str(path)],
-                capture_output=True,
-                check=True,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            return None
-        try:
-            # `xattr -px` wraps its hex dump across lines, each one
-            # whitespace-separated into byte pairs (hexdump-style) -- not
-            # one unbroken run, so every run of whitespace (not just `\n`)
-            # has to go before `bytes.fromhex` sees it.
-            hex_text = "".join(result.stdout.decode("ascii").split())
-            tags = plistlib.loads(bytes.fromhex(hex_text))
-        except (ValueError, plistlib.InvalidFileException):
-            return None
-        for tag in tags:
+        for tag in _mac_user_tags(path):
             name = tag.split("\n", 1)[0]
             if name in _TAG_RGB:
                 return name
         return None
 
     def set(self, path: Path, color: str | None) -> None:
-        if color is None:
-            subprocess.run(["xattr", "-d", _KMD_USER_TAGS_XATTR, str(path)], capture_output=True)
+        """Applies `color` (or clears it for `None`) without touching any
+        other tag `path` already carries. Raises `OSError` if the
+        underlying `xattr` write fails (read-only volume, EPERM, missing
+        `xattr` binary, ...) -- `FileManager._set_tag_color` reports that
+        to the user instead of claiming success for a tag that isn't
+        actually on disk."""
+        kept = [tag for tag in _mac_user_tags(path) if tag.split("\n", 1)[0] not in _TAG_RGB]
+        if color is not None:
+            kept.append(f"{color}\n{_TAG_COLOR_LABEL_INDEX[color]}")
+        path_str = str(path)
+        if not kept:
+            result = subprocess.run(
+                [_XATTR_BIN, "-d", _KMD_USER_TAGS_XATTR, path_str],
+                capture_output=True,
+                timeout=1,
+            )
+            # `xattr -d` on an attribute that was never set is already a
+            # no-op from this method's own point of view (nothing left to
+            # clear), so that one non-zero exit doesn't count as a failure.
+            if result.returncode != 0 and b"No such xattr" not in result.stderr:
+                raise OSError(result.stderr.decode(errors="replace").strip() or "xattr -d failed")
             return
-        index = _TAG_COLOR_LABEL_INDEX[color]
-        payload = plistlib.dumps([f"{color}\n{index}"], fmt=plistlib.FMT_BINARY)
-        subprocess.run(
-            ["xattr", "-w", "-x", _KMD_USER_TAGS_XATTR, payload.hex(), str(path)],
+        payload = plistlib.dumps(kept, fmt=plistlib.FMT_BINARY)
+        result = subprocess.run(
+            [_XATTR_BIN, "-w", "-x", _KMD_USER_TAGS_XATTR, payload.hex(), path_str],
             capture_output=True,
+            timeout=1,
         )
+        if result.returncode != 0:
+            raise OSError(result.stderr.decode(errors="replace").strip() or "xattr -w failed")
 
 
 # The default reader every real run picks (a test overrides it via
@@ -2753,9 +2830,17 @@ class FileManager:
 
     def _refresh(self) -> None:
         node = self.cursor
+        stale_paths = {child.path for child in node.children or ()}
         node.children = None
         ensure_loaded(node)
         self._report_load_error(node)
+        # A Finder tag set outside this app (or outside this session) has
+        # nothing to do with the directory listing itself, so nothing else
+        # here would notice it -- drop every child's cached tag color
+        # (`_tag_color_for`'s own cache) so the next render re-reads it
+        # instead of showing whatever was true before this reload.
+        for path in stale_paths | {child.path for child in node.children or ()}:
+            self._tag_cache.pop(path, None)
         if not node.load_error:
             self.message = f"reloaded {node.name or node.path}"
         if self.selected_file is not None and self.selected_file not in node.children:
@@ -3267,11 +3352,16 @@ class FileManager:
     def _tag_color_for(self, node: Node) -> str | None:
         """`node`'s own Finder tag color (one of `TAG_COLOR_NAMES`), or
         `None` for no tag -- cached per path so painting a tab's whole
-        listing doesn't shell out to `xattr` once per row on every single
-        frame (`render()` rebuilds the tree every frame, per this module's
-        own doc). `_set_tag_color` is the only thing that invalidates an
-        entry; a plain reload/re-scan of the folder does not, since a
-        Finder tag has nothing to do with a directory listing changing."""
+        listing re-reads it at most once per folder visit, not once per
+        row on every single frame (`render()` rebuilds the tree every
+        frame, per this module's own doc; `_MacTagReader.get` is an
+        in-process `ctypes` call rather than a subprocess spawn, but it's
+        still real I/O plus a plist parse, worth skipping on a cache hit).
+        `_set_tag_color` invalidates its own entry immediately; `_refresh`
+        (manual reload or an `enable_fs_watch` re-scan) invalidates every
+        entry for the reloaded folder's children too, since a Finder tag
+        set outside this app (or outside this session) wouldn't otherwise
+        show up until restart."""
         path = node.path
         if path not in self._tag_cache:
             self._tag_cache[path] = self._tag_reader.get(path)
@@ -3282,8 +3372,15 @@ class FileManager:
         as `node`'s own Finder tag, through `self._tag_reader` -- real xattr
         I/O on macOS, a recording stub in a test. Updates the cache
         `_tag_color_for` reads immediately, so the very next render shows
-        the right colored dot with no reload needed."""
-        self._tag_reader.set(node.path, color)
+        the right colored dot with no reload needed. Reports (rather than
+        applies) a failed write: `self._tag_reader.set` raises `OSError`
+        on one, same as every other file op in this class catches and
+        reports instead of updating state as if it had worked."""
+        try:
+            self._tag_reader.set(node.path, color)
+        except OSError as exc:
+            self.message = f"couldn't tag {node.name}: {exc}"
+            return
         self._tag_cache[node.path] = color
         self.message = f"tagged {node.name}: {color}" if color else f"removed {node.name}'s tag"
 
@@ -3504,7 +3601,14 @@ class FileManager:
             self._request_get_info(node)
         elif item_id.startswith("tag:"):
             color = item_id[len("tag:") :]
-            self._set_tag_color(node, None if color == "None" else color)
+            # Guard against an unexpected id: every real id comes from
+            # `_tag_menu_items`, but this same handler is also the arrival
+            # point for tray-menu ids from elsewhere, and `_set_tag_color`
+            # -> `_MacTagReader.set` would otherwise `KeyError` on one.
+            if color == "None":
+                self._set_tag_color(node, None)
+            elif color in TAG_COLOR_NAMES:
+                self._set_tag_color(node, color)
         elif item_id == "rename":
             self._start_rename(node)
         elif item_id == "duplicate":
