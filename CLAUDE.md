@@ -34,11 +34,11 @@ get filed.
 ## quadraui dependency
 
 quadraui-py is on PyPI as `quadraui`, pinned exactly in `pyproject.toml`
-(currently `0.10.1`, the first release with deferred actions, native chrome,
-and the `quadraui.app.hot_reload` building blocks `--reload` runs on). Prebuilt
-wheels install in seconds — no Rust toolchain. Bump the pin to pick up new
-quadraui features. The Linux wheel is TUI-only, so `run_native` is macOS/
-Windows-only in practice.
+(currently `0.11.0` — check `pyproject.toml` itself for the live value, this
+note goes stale faster than that file does). Prebuilt wheels install in
+seconds — no Rust toolchain. Bump the pin to pick up new quadraui features.
+The Linux wheel is TUI-only, so `run_native` is macOS/Windows-only in
+practice.
 
 ## Testing — black-box is the acceptance bar
 

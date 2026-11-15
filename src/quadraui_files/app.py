@@ -109,9 +109,11 @@ key focus -- the file list (the default), or the sidebar:
   right-click empty grid   open the context menu for the browsed folder --
     space                   see the right-click paragraph below for why
                             this works but right-clicking a row doesn't, yet
-  Alt+F / Alt+V   open the menu bar's File/View menu (click works too);
-               arrows move within it, Enter activates, Esc closes -- File
-               has New Folder/New Tab (same actions ⌘⇧N/`t` already back)
+  Alt+F/E/V/W  open the menu bar's File/Edit/View/Window menu (click
+               works too); arrows move within it, Enter activates, Esc
+               closes -- every item reuses an existing action (File:
+               New Folder/New Tab; Edit: Copy/Paste; View: Hide-or-Show
+               Sidebar/Preview; Window: Close Tab), nothing new
   q / Escape   quit the real run loops
 
 A right-click on a row would be the natural way to open the context menu,
@@ -1265,27 +1267,49 @@ def _quantise_rows(px: float, line_height: float) -> float:
 #
 # Pinned to its own 1-line `first_min` the same way the now-removed
 # toolbar was -- see `_render`'s own doc -- above everything else in the
-# window, including the status bar. "File" (New Folder, New Tab -- the
-# same actions `_new_folder`/`_open` already back for the context menu/`t`)
-# and "View" (Hide/Show Sidebar, Hide/Show Preview, each item's own label
-# flipping with the state it toggles, the way Finder's real "Hide
-# Sidebar"/"Show Sidebar" does -- not a static label plus a `checked`
-# checkmark) exist so far; Edit/Window/Help are natural follow-ups once
-# there's a real action to hang on each one.
+# window, including the status bar. Four menus so far, each wired to
+# existing actions rather than new ones invented to fill a slot:
+#   File   New Folder, New Tab -- `_new_folder`/`_open`, already behind
+#          the context menu/`t`.
+#   Edit   Copy, Paste -- `_copy`/`_paste`, already behind the context
+#          menu/`cmd+c`+`cmd+v`. Paste is `disabled` (greyed, not hidden --
+#          unlike the context menu's own Paste, which only appears at all
+#          once something's been copied) when the clipboard is empty, the
+#          conventional menu-bar way to show "nothing to paste" without
+#          the item's presence itself jumping around.
+#   View   Hide/Show Sidebar, Hide/Show Preview, each item's own label
+#          flipping with the state it toggles, the way Finder's real
+#          "Hide Sidebar"/"Show Sidebar" does -- not a static label plus
+#          a `checked` checkmark.
+#   Window Close Tab -- `_close_tab`, already behind `w`. Real Finder's
+#          Window menu is about actual OS windows (Minimize/Zoom/Merge
+#          All) that don't exist here -- this app's "windows" are tabs
+#          within one, and quadraui-py exposes no minimize/zoom call to
+#          Python at all (only `set_document_edited`/
+#          `set_represented_filename`) -- so Close Tab is what's real to
+#          offer, not a placeholder standing in for window chrome this
+#          app doesn't have.
+# Help is a natural follow-up once there's a real action (an About box,
+# a docs link) to hang on it.
 
 MENU_BAR_ID = "fm:menubar"
 MENU_FILE_ID = "menu:file"
 MENU_FILE_NEW_FOLDER_ID = "file:new_folder"
 MENU_FILE_NEW_TAB_ID = "file:new_tab"
+MENU_EDIT_ID = "menu:edit"
+MENU_EDIT_COPY_ID = "edit:copy"
+MENU_EDIT_PASTE_ID = "edit:paste"
 MENU_VIEW_ID = "menu:view"
 MENU_VIEW_SIDEBAR_ID = "view:sidebar"
 MENU_VIEW_PREVIEW_ID = "view:preview"
+MENU_WINDOW_ID = "menu:window"
+MENU_WINDOW_CLOSE_TAB_ID = "window:close_tab"
 
 
-def _menu_bar(*, sidebar_visible: bool, preview_visible: bool) -> dict:
+def _menu_bar(*, sidebar_visible: bool, preview_visible: bool, has_clipboard: bool) -> dict:
     """The `menu_bar` leaf for `_render`'s own topmost strip. Rebuilt every
-    frame (like `_toolbar` used to be) since an item's own label depends on
-    live state."""
+    frame (like `_toolbar` used to be) since an item's own label/`disabled`
+    state depends on live state."""
     return {
         "id": MENU_BAR_ID,
         "menu_bar": {
@@ -1300,6 +1324,18 @@ def _menu_bar(*, sidebar_visible: bool, preview_visible: bool) -> dict:
                     ],
                 },
                 {
+                    "id": MENU_EDIT_ID,
+                    "label": "&Edit",
+                    "submenu": [
+                        {"id": MENU_EDIT_COPY_ID, "label": _styled_text("Copy")},
+                        {
+                            "id": MENU_EDIT_PASTE_ID,
+                            "label": _styled_text("Paste"),
+                            "disabled": not has_clipboard,
+                        },
+                    ],
+                },
+                {
                     "id": MENU_VIEW_ID,
                     "label": "&View",
                     "submenu": [
@@ -1311,6 +1347,13 @@ def _menu_bar(*, sidebar_visible: bool, preview_visible: bool) -> dict:
                             "id": MENU_VIEW_PREVIEW_ID,
                             "label": _styled_text("Hide Preview" if preview_visible else "Show Preview"),
                         },
+                    ],
+                },
+                {
+                    "id": MENU_WINDOW_ID,
+                    "label": "&Window",
+                    "submenu": [
+                        {"id": MENU_WINDOW_CLOSE_TAB_ID, "label": _styled_text("Close Tab")},
                     ],
                 },
             ],
@@ -2484,17 +2527,28 @@ class FileManager:
     def _on_menu_activated(self, item_id: str) -> None:
         """A `MenuActivated` event: an actual menu-bar item was chosen (not
         a parent whose own click just opens/closes its submenu -- that
-        never reaches the app at all, see `_menu_bar`'s own doc). File >
-        New Folder/New Tab reuse the exact same handlers the context menu
-        and `t` already call -- same action, just one more door to it."""
+        never reaches the app at all, see `_menu_bar`'s own doc). Every
+        branch reuses the exact handler the context menu/a plain key
+        already calls for the same action -- the menu bar is one more
+        door to it, never a second implementation. Edit > Copy acts on
+        `_delete_candidate()` (the current selection), same as the
+        context menu's own Copy; Edit > Paste can't fire at all while
+        `_menu_bar` left it `disabled` (an empty clipboard), so this never
+        has to re-check that itself."""
         if item_id == MENU_FILE_NEW_FOLDER_ID:
             self._new_folder()
         elif item_id == MENU_FILE_NEW_TAB_ID:
             self._open()
+        elif item_id == MENU_EDIT_COPY_ID:
+            self._copy(self._delete_candidate())
+        elif item_id == MENU_EDIT_PASTE_ID:
+            self._paste()
         elif item_id == MENU_VIEW_SIDEBAR_ID:
             self._toggle_sidebar()
         elif item_id == MENU_VIEW_PREVIEW_ID:
             self._toggle_preview()
+        elif item_id == MENU_WINDOW_CLOSE_TAB_ID:
+            self._close_tab(self.active_tab)
 
     def _sidebar_entry(self, path: list[int]) -> PlaceSection | Place | None:
         rows, entries = self._sidebar()
@@ -3779,7 +3833,11 @@ class FileManager:
                 "orientation": "vertical",  # menu bar over everything else
                 "ratio": menu_rows / h_total,  # `first` (the menu bar) is the *small* pane here
                 "first_min": menu_rows,
-                "first": _menu_bar(sidebar_visible=self.sidebar_visible, preview_visible=self.preview_visible),
+                "first": _menu_bar(
+                    sidebar_visible=self.sidebar_visible,
+                    preview_visible=self.preview_visible,
+                    has_clipboard=self._clipboard is not None,
+                ),
                 "second": outer,
             }
         }
