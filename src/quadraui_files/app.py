@@ -1005,6 +1005,31 @@ def _trim_incomplete_utf8_tail(data: bytes) -> bytes:
     return data
 
 
+def _size_kind_placeholder(node: Node, mime: str | None, byte_count: int | None = None) -> str:
+    """"N bytes · <mime>" placeholder text, shared by a binary file's own
+    inline preview line (`preview_lines`' binary branch) and an image's
+    `fallback_text` (`preview_leaf`'s image branch -- shown only if the
+    backend's own decode fails: a corrupt file, or a raster format it
+    doesn't support). `byte_count` overrides `node.size_bytes` only when
+    the caller already read a truncated sample and wants to report exactly
+    what it read, not the file's full on-disk size -- `preview_lines` is
+    the only caller that ever passes it; the image branch never does, since
+    it never reads the file into Python at all."""
+    size = _human_size(node.size_bytes if node.size_bytes is not None else byte_count)
+    return f"{size} · {mime or 'binary'}"
+
+
+# `image/svg+xml` is excluded from `preview_leaf`'s image branch below --
+# it's valid UTF-8 XML text (`_looks_binary` already says so), and quadraui's
+# `Image` primitive decodes raster formats, not vector ones, so routing it
+# through there would trade today's actual markup preview for a plain
+# fallback placeholder. Every other `image/*` MIME type is a raster guess
+# worth trying -- an unsupported one just shows `fallback_text` instead of
+# painting anything, never raises (verified against both a corrupt file and
+# a missing path).
+_RASTER_IMAGE_EXCLUDED_MIME = {"image/svg+xml"}
+
+
 def preview_lines(node: Node | None, *, capacity: int) -> list[dict]:
     """Styled-text lines for the preview pane: no selection, a directory, or
     a non-regular file (pipe/socket/device -- opening one of those can block
@@ -1034,8 +1059,7 @@ def preview_lines(node: Node | None, *, capacity: int) -> list[dict]:
         data = _trim_incomplete_utf8_tail(data[:PREVIEW_MAX_BYTES])
     if _looks_binary(data):
         kind, _encoding = mimetypes.guess_type(node.name)
-        size = _human_size(node.size_bytes if node.size_bytes is not None else len(data))
-        return [_styled_text(f"{size} · {kind or 'binary'}")]
+        return [_styled_text(_size_kind_placeholder(node, kind, len(data)))]
     lines = data.decode("utf-8", errors="replace").splitlines() or [""]
     line_truncated = len(lines) > capacity
     needs_marker = byte_truncated or line_truncated
@@ -1051,10 +1075,29 @@ def preview_lines(node: Node | None, *, capacity: int) -> list[dict]:
 
 
 def preview_leaf(node: Node | None, *, capacity: int) -> dict:
-    """The layout-tree leaf for the preview pane: a read-only `text_display`
-    of `preview_lines(node, capacity=capacity)`, pinned to the head of the
-    file (`auto_scroll: False`, `scroll_offset: 0`) rather than its default
-    tail-follow behavior."""
+    """The layout-tree leaf for the preview pane. A raster image (any
+    `image/*` MIME type except `image/svg+xml`, see `_RASTER_IMAGE_EXCLUDED_MIME`'s
+    own doc) gets a real `image` leaf pointed straight at the file -- a
+    no-op on the TUI (`fallback_text` paints instead, worded exactly like
+    the binary-file placeholder `preview_lines` already shows for one), but
+    a real decoded picture on every native backend. Everything else gets
+    the existing read-only `text_display` of `preview_lines(node,
+    capacity=capacity)`, pinned to the head of the file (`auto_scroll:
+    False`, `scroll_offset: 0`) rather than its default tail-follow
+    behavior."""
+    if node is not None and not node.is_dir and node.path.is_file():
+        mime, _encoding = mimetypes.guess_type(node.name)
+        if mime is not None and mime.startswith("image/") and mime not in _RASTER_IMAGE_EXCLUDED_MIME:
+            return {
+                "id": "fm:preview",
+                "image": {
+                    "id": "fm:preview",
+                    "source": {"Path": str(node.path)},
+                    "intrinsic_size": None,
+                    "fit": "Contain",
+                    "fallback_text": _size_kind_placeholder(node, mime),
+                },
+            }
     return {
         "id": "fm:preview",
         "text_display": {
