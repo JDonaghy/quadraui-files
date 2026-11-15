@@ -200,6 +200,12 @@ except ImportError:  # pragma: no cover - defensive, see doc above
 # affordance on it keeps one descriptor set running on every backend.
 UNDO_SUPPORTED = sys.platform != "darwin"
 
+# The `User` payload `FileManager.enable_fs_watch`'s watcher thread posts
+# through the waker on a filesystem change -- the same shape `HOT_RELOAD_WAKE`
+# is for hot reload, just this app's own sentinel rather than one imported
+# from `quadraui.app.hot_reload`.
+FS_WATCH_WAKE = "quadraui_files.fs_watch"
+
 
 @dataclass
 class Node:
@@ -340,6 +346,61 @@ def ensure_loaded(node: Node) -> None:
     """Load `node`'s children once; cheap no-op if already loaded or a file."""
     if node.is_dir and node.children is None:
         load_children(node)
+
+
+def _folder_signature(path: Path) -> tuple[tuple[str, int, int], ...] | None:
+    """A cheap, dependency-free stamp of `path`'s own immediate listing, used
+    by `FileManager.enable_fs_watch` to notice an external change (Finder,
+    another terminal, `rm`/`mv`, ...) with no OS-level watcher (inotify/
+    FSEvents/ReadDirectoryChangesW) and no new runtime dependency -- just a
+    `stat()` per entry, on the one folder the active tab is showing. Each
+    entry's (name, mtime, size), sorted so creation order doesn't matter --
+    changes on an add, a remove, a rename, or a rewrite of an entry's own
+    content/metadata. An entry that disappears mid-scan (a race with another
+    process's own delete/rename) is just skipped rather than failing the
+    whole signature. `None` means `path` itself can't be read right now (just
+    deleted, or a permission revoked); callers treat that as "nothing new to
+    report" -- `_report_load_error` is what surfaces that failure, the next
+    time something actually reloads this folder."""
+    try:
+        listing = []
+        for entry in os.scandir(path):
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            listing.append((entry.name, stat.st_mtime_ns, stat.st_size))
+    except OSError:
+        return None
+    return tuple(sorted(listing))
+
+
+class _FolderSnapshot:
+    """The baseline `FileManager.enable_fs_watch` diffs the active folder
+    against -- the filesystem-watch analogue of `ModuleWatcher` (quadraui's
+    hot-reload baseline). Split the same way: `changed()` only compares,
+    `snapshot()` is the explicit re-arm, done after a change is actually
+    acted on (see `FileManager.fs_watch_if_changed`)."""
+
+    def __init__(self) -> None:
+        self._path: Path | None = None
+        self._signature: tuple[tuple[str, int, int], ...] | None = None
+
+    def snapshot(self, path: Path) -> None:
+        """Record `path`'s current listing as the baseline."""
+        self._path = path
+        self._signature = _folder_signature(path)
+
+    def changed(self, path: Path) -> bool:
+        """Read-only: `True` when `path`'s listing differs from the
+        baseline, or when `path` itself isn't the folder last snapshotted --
+        a tab switch or a drill-down needs its own baseline taken, which
+        reads as "changed" here too so the first check after moving there
+        takes one (see `fs_watch_if_changed`), the same as a real external
+        edit would. Does not update the baseline itself."""
+        if path != self._path:
+            return True
+        return _folder_signature(path) != self._signature
 
 
 def _reparent_paths(node: Node) -> None:
@@ -1944,6 +2005,11 @@ class FileManager:
         self._hr_watcher: ModuleWatcher | None = None
         self._hr_thread: tuple[threading.Event, threading.Thread] | None = None
         self._hr_rollback = None         # armed for the first frame after a reload
+        # Filesystem-watch state (off by default -- `enable_fs_watch` turns it
+        # on; see that method's own doc for why this app doesn't start it
+        # here unconditionally).
+        self._fw_watcher: _FolderSnapshot | None = None
+        self._fw_thread: tuple[threading.Event, threading.Thread] | None = None
         self.app = QuiApp(width, height, render=lambda: self._render_frame())
         # Obtained here, from top-level code: `actions()` is the only way the
         # handler can reach an overlay/OS call, and it is unreachable once a
@@ -3420,6 +3486,96 @@ class FileManager:
             self.reload_count -= 1
             return self._render()
 
+    # --- filesystem watch ------------------------------------------------------
+    #
+    # Off by default; wired on for a real `--tui`/`--native` session (see
+    # cli.py), not here, so a bare `FileManager()` in a script or test never
+    # gets a background thread it didn't ask for. Same shape as hot reload,
+    # just watching the active tab's own folder instead of a module's source
+    # file: a daemon thread stats that folder's listing (`_folder_signature`)
+    # on an interval, posts `FS_WATCH_WAKE` through the waker on a change,
+    # and the wake -- dispatched on the run loop's own thread, like every
+    # other event -- re-runs the same `ensure_loaded`/`_report_load_error`
+    # work `r` (`_refresh`) already does. Dependency-free on purpose: polling
+    # one folder's `stat()`s is cheap enough that a real OS-level watcher
+    # (inotify/FSEvents/ReadDirectoryChangesW, e.g. the `watchdog` package)
+    # isn't worth this app's first runtime dependency beyond `quadraui`
+    # itself for a first pass -- revisit if the interval ever needs to drop
+    # low enough for that tradeoff to flip.
+    #
+    # Scope matches `_refresh()`'s own: only the active tab's folder, not
+    # every open tab or every loaded-but-not-shown `Node`. Switching tabs or
+    # drilling into a subfolder moves the watch there on the very next tick
+    # (`_fs_watch_loop` re-reads `self.cursor.path` each time, not a path
+    # captured once at `enable_fs_watch` time) and takes a fresh baseline
+    # rather than diffing against the folder left behind -- which also means
+    # the first tick after a navigation always reads as "changed" and
+    # refreshes once more, harmlessly, same as pressing `r` right after
+    # arriving somewhere new would be.
+
+    def enable_fs_watch(self, interval: float | None = 1.0) -> None:
+        """Watch the active tab's own folder for changes made outside this
+        app (Finder, another terminal, `rm`/`mv`, ...) and refresh it the
+        same way `r` already does. With `interval` (seconds) a daemon
+        thread checks the folder and wakes the event loop on a change, so a
+        running `run_tui()`/`run_native()` session picks an external edit up
+        with no input; with `interval=None` nothing happens until
+        `fs_watch_if_changed()` is called (the shape tests use). Calling
+        this again restarts the watch."""
+        self.disable_fs_watch()
+        self._fw_watcher = _FolderSnapshot()
+        self._fw_watcher.snapshot(self.cursor.path)
+        if interval is not None:
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._fs_watch_loop,
+                args=(self.waker, interval, stop),
+                name="quadraui-files-fs-watch",
+                daemon=True,
+            )
+            self._fw_thread = (stop, thread)
+            thread.start()
+
+    def disable_fs_watch(self) -> None:
+        """Stop watching (and stop the watcher thread, if any)."""
+        if self._fw_thread is not None:
+            stop, thread = self._fw_thread
+            stop.set()
+            thread.join(timeout=2.0)
+            self._fw_thread = None
+        self._fw_watcher = None
+
+    def _fs_watch_loop(self, waker, interval: float, stop: threading.Event) -> None:
+        """Post `FS_WATCH_WAKE` on every tick the active folder's listing
+        differs from the last-seen baseline. Reads `self._fw_watcher`/
+        `self.cursor.path` fresh each tick rather than anything captured at
+        `enable_fs_watch` time, the same "always reflects whatever the
+        handler currently has" story `FileManager._watch_loop` follows for
+        hot reload -- a tab switch or drill-down mid-session moves the watch
+        with no extra wiring. Posting per tick instead of once per distinct
+        change is the same safety net `_watch_loop`'s own doc describes: a
+        wake a backend drops or coalesces still gets a fresh one next tick,
+        since `changed()` stays `True` until something actually re-arms the
+        baseline (`fs_watch_if_changed`)."""
+        while not stop.wait(interval):
+            watcher = self._fw_watcher
+            if watcher is None:
+                continue
+            if watcher.changed(self.cursor.path):
+                waker.post(FS_WATCH_WAKE)
+
+    def fs_watch_if_changed(self) -> bool:
+        """Refresh the active folder when the watcher noticed a change since
+        the last check, else `False`. Needs `enable_fs_watch()` first."""
+        if self._fw_watcher is None:
+            raise RuntimeError("enable_fs_watch() has not been called")
+        path = self.cursor.path
+        if not self._fw_watcher.changed(path):
+            return False
+        self._fw_watcher.snapshot(path)
+        self._refresh()
+        return True
+
     # --- render + handle -----------------------------------------------------
 
     def _folder_label(self, node: Node) -> str:
@@ -3843,17 +3999,22 @@ class FileManager:
         }
 
     def _handle(self, event) -> None:
-        """Per-event entry point: a hot-reload wake from the watcher thread
-        runs the reload first (on the dispatch thread, as it must be), then
-        `_prime_native_chrome` (C13) on the very first dispatch of a run that
-        opted into it, then `_dispatch` does the real work, then this syncs
-        the window title against wherever the cursor landed -- after every
-        event, not just a navigation one, so it still catches a
-        `TabClosed`/`_forget` pulling the cursor back onto a different node
-        with no dedicated "move" call of its own."""
+        """Per-event entry point: a hot-reload or filesystem-watch wake from
+        one of the watcher threads runs its own reaction first (on the
+        dispatch thread, as it must be), then `_prime_native_chrome` (C13)
+        on the very first dispatch of a run that opted into it, then
+        `_dispatch` does the real work, then this syncs the window title
+        against wherever the cursor landed -- after every event, not just a
+        navigation one, so it still catches a `TabClosed`/`_forget` pulling
+        the cursor back onto a different node with no dedicated "move" call
+        of its own."""
         if isinstance(event, dict) and event.get("User") == HOT_RELOAD_WAKE:
             if self._hr_watcher is not None:
                 self.reload_if_changed()
+            return
+        if isinstance(event, dict) and event.get("User") == FS_WATCH_WAKE:
+            if self._fw_watcher is not None:
+                self.fs_watch_if_changed()
             return
         self._prime_native_chrome()
         self._dispatch(event)

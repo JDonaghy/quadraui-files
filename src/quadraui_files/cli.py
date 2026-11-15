@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             nerd = detect_nerd_fonts()
         fm.set_nerd_fonts(nerd)
+        fm.enable_fs_watch()  # external edits to the active folder show up with no Refresh
         _wrap_quit(fm)  # real terminal: raw mode, live redraw on key events
         fm.start_live_title()
         try:
@@ -84,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         except _Quit:
             pass
     elif "--native" in flags:
+        fm.enable_fs_watch()  # external edits to the active folder show up with no Refresh
         _wrap_quit(fm)  # OS window: AppKit / GTK / Win32 per the built feature
         fm.live_title = True  # `run_native(title=...)` sets the initial one
         # Only safe to flip right here, right before the one call that
