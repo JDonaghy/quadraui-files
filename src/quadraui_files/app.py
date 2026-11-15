@@ -157,6 +157,7 @@ from __future__ import annotations
 import math
 import mimetypes
 import os
+import plistlib
 import shutil
 import struct
 import subprocess
@@ -167,6 +168,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from stat import filemode
+from typing import Callable, Protocol
 
 from quadraui import InternalError, QuadrauiError, QuiApp
 from quadraui.app.hot_reload import (
@@ -550,6 +552,156 @@ def _styled_text(text: str) -> dict:
     return {"spans": [{"text": text, "fg": None, "bg": None}]}
 
 
+# --- color tags (macOS only, #54) --------------------------------------------
+#
+# Finder's own per-file color tags -- the 7 built-in colors it's shipped
+# since Mavericks, painted as a colored dot next to a file's name and offered
+# as a picker from Get Info / the context menu. Windows/Nautilus have no
+# equivalent metadata to anchor a cross-platform design on (VISION.md's
+# Finder-parity backlog explicitly ranks this item last for exactly that
+# reason), so this is deliberately macOS-only, both in storage (real xattr/
+# Spotlight metadata, not app-private state -- a tag set here shows up in a
+# real Finder window on the same file, and vice versa) and in the picker UI,
+# which simply isn't offered anywhere else (`FileManager._tags_supported`).
+#
+# The colored dot itself needed no new descriptor seam: `details_table`'s
+# Name cell is already a `StyledText` with an arbitrary per-span `fg`
+# (`_styled_text`, just above), so the dot is just one more colored glyph
+# span ahead of the name -- the gap flagged as a maybe in this issue never
+# actually came up.
+
+
+@dataclass(frozen=True)
+class TagColor:
+    """One of Finder's 7 built-in label colors."""
+
+    name: str
+    rgb: tuple[int, int, int]
+
+
+TAG_COLORS: tuple[TagColor, ...] = (
+    TagColor("Red", (255, 69, 58)),
+    TagColor("Orange", (255, 159, 10)),
+    TagColor("Yellow", (255, 214, 10)),
+    TagColor("Green", (48, 209, 88)),
+    TagColor("Blue", (10, 132, 255)),
+    TagColor("Purple", (191, 90, 242)),
+    TagColor("Gray", (142, 142, 147)),
+)
+TAG_COLOR_NAMES: tuple[str, ...] = tuple(c.name for c in TAG_COLORS)
+_TAG_RGB: dict[str, tuple[int, int, int]] = {c.name: c.rgb for c in TAG_COLORS}
+# Finder's own legacy label index (1-7, written as the trailing digit of the
+# `"<name>\n<index>"` tag string `_MacTagReader` reads/writes) -- order
+# matches the swatch row Finder's own Tags picker shows, not alphabetical.
+_TAG_COLOR_LABEL_INDEX: dict[str, int] = {c.name: i + 1 for i, c in enumerate(TAG_COLORS)}
+_TAG_DOT_GLYPH = "●"
+
+
+def _tag_dot_span(color: str | None) -> dict | None:
+    """The Name cell's leading `StyledSpan` for `color` (one of
+    `TAG_COLOR_NAMES`), or `None` when there's no tag to show at all --
+    `DataRow` has no `Icon`-bearing field (`_codicon_glyph`'s own doc covers
+    the same gap for the file-type marker), so the dot is just a colored
+    glyph baked into the cell's own `StyledText.spans`."""
+    if color is None:
+        return None
+    r, g, b = _TAG_RGB[color]
+    return {"text": f"{_TAG_DOT_GLYPH} ", "fg": {"r": r, "g": g, "b": b, "a": 255}, "bg": None}
+
+
+class TagReader(Protocol):
+    """Reads/writes one path's Finder tag color: `None` means no tag, else
+    one of `TAG_COLOR_NAMES`. `_MacTagReader` is the real, macOS-only
+    implementation; `_NullTagReader` is the permanent no-op everywhere else.
+    A test injects its own stub instead of either (`FileManager(...,
+    tag_reader=...)`) -- the "black-box for the rendering/picker UI with a
+    stubbed tag reader" story this issue's own Verification section asks
+    for, since there is no real xattr to read on the box the suite runs on."""
+
+    def get(self, path: Path) -> str | None: ...
+
+    def set(self, path: Path, color: str | None) -> None: ...
+
+
+class _NullTagReader:
+    """The non-macOS `TagReader`: Windows and Linux have no `kMDItemUserTags`
+    equivalent to read or write (this issue's own "no Explorer/Nautilus
+    equivalent" is why color tags stay macOS-only), so every call here is a
+    no-op. `FileManager._tags_supported` is `False` exactly when this is the
+    active reader, which is what actually hides the picker UI -- this
+    class's own no-op-ness alone would just mean every tag silently reads
+    back `None`, not that the picker disappears."""
+
+    def get(self, path: Path) -> str | None:
+        return None
+
+    def set(self, path: Path, color: str | None) -> None:
+        pass
+
+
+_KMD_USER_TAGS_XATTR = "com.apple.metadata:_kMDItemUserTags"
+
+
+class _MacTagReader:
+    """The real macOS `TagReader`: Finder's own `_kMDItemUserTags` xattr, a
+    binary-plist array of `"<name>\\n<label-index>"` strings -- the exact
+    shape Finder itself reads/writes, so a tag set here shows up in a real
+    Finder window on the same file, and vice versa. Goes through the
+    `/usr/bin/xattr` CLI rather than `os.getxattr`/`os.setxattr`: CPython's
+    `posixmodule.c` only builds those under `HAVE_XATTR`, which its own
+    `configure` never defines on Darwin, so there is no in-process call to
+    reach for here instead -- a plain OS call either way, per this issue's
+    own doc, just not Python's own `os` module's version of one. Keeps (and
+    writes) only the first tag that names one of Finder's 7 built-in
+    colors -- a file can carry other, free-text tags too, which aren't a
+    color this app's picker offers and are left untouched by both `get()`
+    and `set()`."""
+
+    def get(self, path: Path) -> str | None:
+        try:
+            result = subprocess.run(
+                ["xattr", "-p", "-x", _KMD_USER_TAGS_XATTR, str(path)],
+                capture_output=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        try:
+            # `xattr -px` wraps its hex dump across lines, each one
+            # whitespace-separated into byte pairs (hexdump-style) -- not
+            # one unbroken run, so every run of whitespace (not just `\n`)
+            # has to go before `bytes.fromhex` sees it.
+            hex_text = "".join(result.stdout.decode("ascii").split())
+            tags = plistlib.loads(bytes.fromhex(hex_text))
+        except (ValueError, plistlib.InvalidFileException):
+            return None
+        for tag in tags:
+            name = tag.split("\n", 1)[0]
+            if name in _TAG_RGB:
+                return name
+        return None
+
+    def set(self, path: Path, color: str | None) -> None:
+        if color is None:
+            subprocess.run(["xattr", "-d", _KMD_USER_TAGS_XATTR, str(path)], capture_output=True)
+            return
+        index = _TAG_COLOR_LABEL_INDEX[color]
+        payload = plistlib.dumps([f"{color}\n{index}"], fmt=plistlib.FMT_BINARY)
+        subprocess.run(
+            ["xattr", "-w", "-x", _KMD_USER_TAGS_XATTR, payload.hex(), str(path)],
+            capture_output=True,
+        )
+
+
+# The default reader every real run picks (a test overrides it via
+# `FileManager`'s own `tag_reader=` constructor arg, never this global) --
+# `sys.platform` is right here, unlike the `_NATIVE_BACKEND` check at this
+# module's own top: this is a host-OS capability (which xattr exists to
+# read), not a built Cargo feature a cross-compiled binary could disagree
+# with its host about.
+TAG_READER: TagReader = _MacTagReader() if sys.platform == "darwin" else _NullTagReader()
+
+
 @dataclass(frozen=True)
 class Place:
     """One sidebar entry: a folder the platform's own file manager pins
@@ -931,6 +1083,7 @@ def details_table(
     has_focus: bool = False,
     nerd_fonts_enabled: bool = False,
     column_overrides: list[float | None] | None = None,
+    tag_color_for: Callable[[Node], str | None] | None = None,
 ) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
     content subtree of tab `index`. `children` is the rows' display order
@@ -959,7 +1112,12 @@ def details_table(
     units instead. Shared globally across every tab's own table (like
     `ratio`/`sort_col`, not per-tab), so resizing a column in one tab
     resizes it everywhere -- defaults to no overrides at all for a direct
-    caller (`--dump`, a test) that never passes one."""
+    caller (`--dump`, a test) that never passes one. `tag_color_for` (#54)
+    is `FileManager._tag_color_for`, or `None` for a direct caller that
+    doesn't care about tags -- when given, it leads the Name cell with
+    `_tag_dot_span`'s colored dot for whichever child carries a Finder tag,
+    same no-op-when-`None`-per-row story `_NullTagReader` already gives a
+    real caller on a platform with no tags to show."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
@@ -1004,8 +1162,18 @@ def details_table(
             size = "" if child.is_dir else _human_size(child.size_bytes)
             modified = _human_mtime(child.mtime)
             kind = _human_kind(child)
+            dot = _tag_dot_span(tag_color_for(child)) if tag_color_for is not None else None
+            name_spans = [dot] if dot is not None else []
+            name_spans.append({"text": name, "fg": None, "bg": None})
             rows.append(
-                {"cells": [_styled_text(name), _styled_text(size), _styled_text(modified), _styled_text(kind)]}
+                {
+                    "cells": [
+                        {"spans": name_spans},
+                        _styled_text(size),
+                        _styled_text(modified),
+                        _styled_text(kind),
+                    ]
+                }
             )
 
     return {
@@ -1855,11 +2023,31 @@ class FileManager:
         height: int = 30,
         *,
         sections: list[PlaceSection] | None = None,
+        tag_reader: TagReader | None = None,
     ):
         """Open on `root_path` (default: the home folder, as Finder and
         Explorer do). `sections` overrides the host OS's own sidebar places
-        (`default_sections`) -- tests pass a fixed set."""
+        (`default_sections`) -- tests pass a fixed set. `tag_reader`
+        overrides `TAG_READER` (#54) -- a test passes its own stub, since
+        there is no real Finder xattr to read on the box the suite runs
+        on; a real run never passes one, picking up the host's own
+        capability (`_MacTagReader` on macOS, `_NullTagReader` elsewhere)."""
         self.sections = default_sections() if sections is None else sections
+        self._tag_reader: TagReader = TAG_READER if tag_reader is None else tag_reader
+        # Hides the whole tag-color picker (Get Info's buttons, the context
+        # menu's "Tags" submenu) whenever the active reader can't actually
+        # persist a tag -- the default `_NullTagReader` on Windows/Linux, or
+        # a test's own stub standing in for one. Does *not* gate the grid's
+        # own colored dot (`_tag_color_for` below): a `_NullTagReader` just
+        # never has a color to report, so the dot already stays off with no
+        # extra check needed there.
+        self._tags_supported = not isinstance(self._tag_reader, _NullTagReader)
+        self._tag_cache: dict[Path, str | None] = {}  # path -> last-read tag color, see `_tag_color_for`
+        # Which node a resolved Get Info dialog's own tag button (#54)
+        # should apply to -- set right before that dialog opens, same
+        # "only meaningful while its own dialog is up" story `_delete_target`
+        # already has for the trash confirm.
+        self._get_info_target: Node | None = None
         self.collapsed_sections: set[str] = set()  # sidebar section titles folded shut
         self._roots: dict[str, Node] = {}  # filesystem anchor -> its model root (see `_node_for`)
         self.root = self._node_for(root_path or Path.home())  # the start folder
@@ -3076,13 +3264,45 @@ class FileManager:
         self._set_selected_file(new_node)
         self.message = f"pasted {new_node.name}"
 
+    def _tag_color_for(self, node: Node) -> str | None:
+        """`node`'s own Finder tag color (one of `TAG_COLOR_NAMES`), or
+        `None` for no tag -- cached per path so painting a tab's whole
+        listing doesn't shell out to `xattr` once per row on every single
+        frame (`render()` rebuilds the tree every frame, per this module's
+        own doc). `_set_tag_color` is the only thing that invalidates an
+        entry; a plain reload/re-scan of the folder does not, since a
+        Finder tag has nothing to do with a directory listing changing."""
+        path = node.path
+        if path not in self._tag_cache:
+            self._tag_cache[path] = self._tag_reader.get(path)
+        return self._tag_cache[path]
+
+    def _set_tag_color(self, node: Node, color: str | None) -> None:
+        """Apply `color` (one of `TAG_COLOR_NAMES`, or `None` to clear it)
+        as `node`'s own Finder tag, through `self._tag_reader` -- real xattr
+        I/O on macOS, a recording stub in a test. Updates the cache
+        `_tag_color_for` reads immediately, so the very next render shows
+        the right colored dot with no reload needed."""
+        self._tag_reader.set(node.path, color)
+        self._tag_cache[node.path] = color
+        self.message = f"tagged {node.name}: {color}" if color else f"removed {node.name}'s tag"
+
     def _request_get_info(self, node: Node | None) -> None:
         """Get Info: a modal dialog (real Finder's own is a floating
         non-modal panel -- `QuiAppActions.show_float` could get closer, but
         that's a separate, bigger seam than this pass; see VISION.md's
         backlog) with Kind/Size-or-item-count/Modified/Created/Where/
         Permissions, reusing the exact vocabulary the details grid's own
-        Kind column and `_human_mtime` already use elsewhere."""
+        Kind column and `_human_mtime` already use elsewhere. With
+        `self._tags_supported` (#54), also shows the current tag and a
+        "Tags…" button: `show_message_dialog`'s own button row has no
+        wrapping (and rejects `tint` outright -- `InvalidDescriptorError`,
+        "this surface does not honor it yet"), so one button per color
+        would just overflow off the dialog's own width, unlike a context
+        menu's vertically-stacked items. Resolving "Tags…" (through
+        `_on_dialog_resolved`) opens exactly that picker instead --
+        `_tag_menu_items`, the same list `_request_context_menu`'s own
+        "Tags" submenu shows, reused rather than duplicated."""
         if node is None:
             self.message = "select something to get info about"
             return
@@ -3106,10 +3326,15 @@ class FileManager:
             f"Where: {where}",
             f"Permissions: {filemode(st.st_mode)}",
         ]
+        buttons = [{"id": "ok", "label": "OK", "is_default": True, "is_cancel": True}]
+        if self._tags_supported:
+            lines.append(f"Tag: {self._tag_color_for(node) or 'None'}")
+            buttons.append({"id": "tags", "label": "Tags…"})
+            self._get_info_target = node
         self.actions.show_message_dialog(
             title=node.name,
             body="\n".join(lines),
-            buttons=[{"id": "ok", "label": "OK", "is_default": True, "is_cancel": True}],
+            buttons=buttons,
         )
 
     def _request_delete(self, node: Node | None) -> None:
@@ -3155,12 +3380,19 @@ class FileManager:
         )
 
     def _on_dialog_resolved(self, button_id: str) -> None:
-        """The confirm dialog closed with `button_id`: trash on "delete", drop
-        the pending target either way."""
+        """The confirm dialog closed with `button_id`: trash on "delete", or
+        open the tag-color picker on Get Info's own "tags" button (#54) --
+        drop the pending target either way. Only one dialog is ever open at
+        a time, so whichever pending target this wasn't for is already
+        `None`."""
         target = self._delete_target
         self._delete_target = None
         if button_id == "delete" and target is not None:
             self._trash(target)
+        info_target = self._get_info_target
+        self._get_info_target = None
+        if info_target is not None and button_id == "tags":
+            self._open_tag_picker(info_target)
 
     def _request_context_menu(self, node: Node | None) -> None:
         """Put up a context menu for `node` -- the folder being browsed
@@ -3176,12 +3408,21 @@ class FileManager:
         clipboard, same as Finder graying it out (here: leaving it off)
         otherwise. Item order keeps "Open"/"Reveal" first, same positions
         `tests/test_actions.py` already pins down, with the newer items
-        after them and "Move to Trash" still last."""
-        self._menu_target = node or self.cursor
+        after them and "Move to Trash" still last. "Tags" (#54) is a
+        submenu right after "Get Info", same adjacency real Finder's own
+        context menu has, and only appears at all while `self._tags_supported`
+        -- hidden on Windows/Linux, same "no equivalent metadata" story
+        `_NullTagReader` is for."""
+        target = node or self.cursor
+        self._menu_target = target
         items = [
             {"id": "open", "label": _styled_text("Open")},
             {"id": "reveal", "label": _styled_text("Reveal")},
             {"id": "get_info", "label": _styled_text("Get Info")},
+        ]
+        if self._tags_supported:
+            items.append({"id": "tags", "label": _styled_text("Tags"), "submenu": self._tag_menu_items(target)})
+        items += [
             {"id": "rename", "label": _styled_text("Rename")},
             {"id": "duplicate", "label": _styled_text("Duplicate")},
             {"id": "copy", "label": _styled_text("Copy")},
@@ -3191,6 +3432,43 @@ class FileManager:
             items.append({"id": "paste", "label": _styled_text("Paste")})
         items.append({"id": "trash", "label": _styled_text("Move to Trash")})
         self.actions.show_context_menu(items=items, position=(2, 2))
+
+    def _tag_menu_items(self, node: Node) -> list[dict]:
+        """The tag-color picker's own items (#54): "No Tag" plus one entry
+        per `TAG_COLOR_NAMES`, each with a colored-dot `icon` and `checked`
+        set on whichever one is `node`'s own current tag. Used both as the
+        context menu's "Tags" submenu (`_request_context_menu`) and as a
+        standalone top-level menu Get Info's own "Tags…" button opens
+        (`_open_tag_picker`) -- either way, picking one fires the same
+        `"tag:<name>"` id `_on_menu_item` applies through `_set_tag_color`."""
+        current = self._tag_color_for(node)
+        tag_items = [{"id": "tag:None", "label": _styled_text("No Tag"), "checked": current is None}]
+        for color in TAG_COLOR_NAMES:
+            r, g, b = _TAG_RGB[color]
+            tag_items.append(
+                {
+                    "id": f"tag:{color}",
+                    "label": _styled_text(color),
+                    "checked": current == color,
+                    "icon": {"glyph": _TAG_DOT_GLYPH, "fallback": "*", "color": {"r": r, "g": g, "b": b, "a": 255}},
+                }
+            )
+        return tag_items
+
+    def _open_tag_picker(self, node: Node) -> None:
+        """Get Info's "Tags…" button (#54): opens `_tag_menu_items(node)` as
+        a standalone context menu, with `self._menu_target` set to `node` so
+        `_on_menu_item`'s existing `"tag:<name>"` handling applies the pick
+        -- the exact same path a right-click's own "Tags" submenu uses, just
+        reached from a different door. A real button click resolves (and
+        the backend's own widget removes) the Get Info dialog before this
+        ever runs -- `QuiAppActions` has no `dismiss_message_dialog` of its
+        own to call here even if it needed to (only `QuiApp`'s reentrant-
+        unsafe one does, unreachable from a handler); only a *synthetic*
+        `MessageDialogResolved` pushed straight at `step()`, skipping that
+        real click, leaves the dialog's own box stacked underneath this."""
+        self._menu_target = node
+        self.actions.show_context_menu(items=self._tag_menu_items(node), position=(2, 2))
 
     def _on_menu_item(self, item_id: str) -> None:
         """A `ContextMenuItemActivated` event: a tray-menu item (C13) fires
@@ -3224,6 +3502,9 @@ class FileManager:
             self._reveal_in_os(node)
         elif item_id == "get_info":
             self._request_get_info(node)
+        elif item_id.startswith("tag:"):
+            color = item_id[len("tag:") :]
+            self._set_tag_color(node, None if color == "None" else color)
         elif item_id == "rename":
             self._start_rename(node)
         elif item_id == "duplicate":
@@ -3691,6 +3972,7 @@ class FileManager:
                 has_focus=is_active and self.table_focus and not self.edit_mode,
                 nerd_fonts_enabled=self._nerd_fonts_enabled,
                 column_overrides=self.column_overrides,
+                tag_color_for=self._tag_color_for,
             )
 
         header_rows = self._chrome_line_height / self._line_height
