@@ -57,6 +57,9 @@ core smoke set (`tests/test_smoke.py`) green.
 ## Conventions
 
 - Python 3.10+, type hints.
-- This repo is worked interactively, not through the coord pipeline: file
-  quadraui gaps on JDonaghy/quadraui and app follow-ups on this repo's issues.
+- Quadraui engine gaps go on JDonaghy/quadraui. Substantial app-level
+  follow-ups are filed as issues on this repo's own tracker and tracked
+  through coord — queue the ones ready for dispatch (`coord drive-queue add
+  quadraui-files <issue>`), leave the rest filed but untracked for manual/
+  out-of-band pickup.
 - Commit and push before your final message.
