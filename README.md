@@ -91,10 +91,11 @@ repeat click is refused ("nothing left to undo") instead of queued. On **macOS**
 is no programmatic trash-restore API to delegate to, so the button is not offered there
 at all (`UNDO_SUPPORTED` in `app.py`) — a host capability, not a backend branch.
 
-A right-click would be the natural way to raise the context menu, but the pinned
-quadraui's `Tree`/`DataTable` row-click events don't report which mouse button fired
-them (JDonaghy/quadraui#2555), so `Menu`/`Shift+F10` are the keyboard stand-ins —
-there's no mouse-only path to it in the TUI until that's fixed upstream.
+A right-click on a row would be the natural way to raise the context menu, but the
+pinned quadraui's `Tree`/`DataTable` row-click events don't report which mouse button
+fired them (JDonaghy/quadraui#2555), so `Menu`/`Shift+F10` are the keyboard stand-ins
+for that case. A right-click on the grid's own empty space (below/between rows) isn't
+affected by that gap and already works, opening the same menu with nothing selected.
 
 The left pane is the host OS's own sidebar (Finder's Favorites/iCloud/Locations on
 macOS, Explorer's Quick access/This PC on Windows, Nautilus's places on Linux), even in

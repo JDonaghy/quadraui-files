@@ -95,14 +95,18 @@ key focus -- the file list (the default), or the sidebar:
   click a tab / its ×      switch to / close that tab
   click the preview header's × close the preview pane (same as pressing `p`
                             while it's shown)
+  right-click empty grid   open the context menu for the browsed folder --
+    space                   see the right-click paragraph below for why
+                            this works but right-clicking a row doesn't, yet
   q / Escape   quit the real run loops
 
-A right-click would be the natural way to open the context menu, but the
-installed quadraui's `Tree`/`DataTable` row-click events don't report which
-mouse button triggered them, so a right click on a row can't be told apart
-from a left one here (JDonaghy/quadraui#2555) -- `Menu`/`Shift+F10` are the
-keyboard stand-ins, and until that's fixed upstream there is no mouse-only
-path to the context menu in the TUI.
+A right-click on a row would be the natural way to open the context menu,
+but the installed quadraui's `Tree`/`DataTable` row-click events don't
+report which mouse button triggered them, so one can't be told apart from
+a left click there (JDonaghy/quadraui#2555) -- `Menu`/`Shift+F10` are the
+keyboard stand-ins for that case. A right-click that lands on the grid's
+own empty space (below/between rows) is unaffected by that gap and does
+work, opening the same menu Menu/Shift+F10 show with nothing selected.
 
 Hot reload: run with `--reload` and the app re-imports its own module whenever
 the source file changes, keeping the running session's state (open tabs,
@@ -3675,6 +3679,32 @@ class FileManager:
             elif isinstance(focused, str) and focused.startswith("fm:grid:"):
                 self.table_focus = True
             return
+
+        if "MouseUp" in event:
+            # A real right-click *does* still carry `button` -- just not on
+            # a `Tree`/`DataTable` row, whose own hit-test resolution drops
+            # it before this app ever sees it (JDonaghy/quadraui#2555). A
+            # right-click that lands on the grid's own empty space (below/
+            # between rows, hit kind `split_second_pane` on `fm:addr_split`)
+            # keeps it, so that one case -- empty-space, same as a context
+            # menu opened with nothing selected -- is real mouse-only
+            # parity with Finder today; a right-click *on* a row still
+            # isn't, until that issue lands. Guarded the same way
+            # `_on_accelerator`/`_on_toolbar_button` guard their own
+            # equivalents: dropped while the filter/rename box or a
+            # dialog/menu is already up.
+            mouse = event["MouseUp"]
+            hit = event.get("hit") or {}
+            if (
+                self.edit_mode is None
+                and self._delete_target is None
+                and self._menu_target is None
+                and mouse.get("button") == "Right"
+                and mouse.get("widget") == "fm:addr_split"
+                and hit.get("kind") == "split_second_pane"
+            ):
+                self._request_context_menu(None)
+                return
 
         if self.edit_mode is not None and self._handle_edit_key(event):
             return

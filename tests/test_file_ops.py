@@ -31,6 +31,19 @@ def _accel(accel_id: str) -> dict:
     return {"Accelerator": [accel_id, {"shift": False, "ctrl": False, "alt": False, "cmd": False}]}
 
 
+_NO_MODS = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
+
+
+def _right_click(fm: FileManager, x: float, y: float) -> None:
+    """A real synthesized right-button `MouseDown`/`MouseUp` pair -- unlike
+    `conftest.click`, which always sends `"Left"`. Only meaningful off a
+    row (`_dispatch`'s own `"MouseUp"` branch): a right-click *on* a row
+    still can't be told apart from a left one (JDonaghy/quadraui#2555)."""
+    for kind in ("MouseDown", "MouseUp"):
+        fm.app.push_event({kind: {"position": {"x": x, "y": y}, "button": "Right", "modifiers": _NO_MODS}})
+        fm.app.step()
+
+
 def _names(fm: FileManager) -> list[str]:
     return sorted(c.name for c in (fm.open[fm.active_tab].children or []))
 
@@ -247,3 +260,52 @@ def test_context_menu_rename_item_opens_the_rename_box(sample_tree):
 
     assert fm.edit_mode == "rename"
     assert fm.rename_target is not None and fm.rename_target.name == "readme.txt"
+
+
+# --- a real right-click, where it's actually possible today ----------------
+
+
+def test_right_click_on_empty_grid_space_opens_the_context_menu(sample_tree):
+    """A right-click that lands on the grid's own empty space (below/
+    between rows) still carries its real `button` all the way through --
+    unlike one that lands on a row, which can't be told apart from a left
+    click yet (JDonaghy/quadraui#2555). Acts like nothing's selected
+    (`_request_context_menu(None)`), the same menu Menu/Shift+F10 show
+    with nothing selected -- not whatever row happens to be selected
+    elsewhere in the tab."""
+    (sample_tree / "readme.txt").write_text("hello")
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    _select(fm, "readme.txt")  # something *is* selected elsewhere
+
+    _right_click(fm, 50.0, 15.0)  # empty space below the listed rows
+
+    assert fm._menu_target is not None and fm._menu_target.name == fm.cursor.name
+    assert "New Folder" in fm.app.screen()
+
+
+def test_right_click_on_a_row_still_cannot_open_the_context_menu(sample_tree):
+    """The still-blocked case: right-clicking an actual row resolves
+    identically to a left click (`RowSelected`, no button carried), so no
+    menu opens -- documents today's real limit rather than silently
+    passing because the assertion is too loose."""
+    (sample_tree / "readme.txt").write_text("hello")
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+
+    x, y = _find_row(fm, "readme.txt")
+    _right_click(fm, x, y)
+
+    assert fm._menu_target is None
+    assert fm.selected_file is not None and fm.selected_file.name == "readme.txt"
+
+
+def test_right_click_on_empty_grid_space_is_suppressed_while_editing(sample_tree):
+    fm = FileManager(sample_tree)
+    _open_root_tab(fm)
+    fm._start_filter()
+
+    _right_click(fm, 50.0, 15.0)
+
+    assert fm._menu_target is None
+    assert fm.edit_mode == "filter"
