@@ -44,7 +44,7 @@ def test_alt_v_opens_the_view_menu_with_both_items(sample_tree):
     fm.step(_alt("v"))
     screen = fm.app.screen()
     assert "Hide Sidebar" in screen
-    assert "Hide Preview" in screen
+    assert "Show Preview" in screen  # hidden by default; the label says so
 
 
 def test_choosing_hide_sidebar_hides_it_and_flips_its_own_label(sample_tree):
@@ -86,6 +86,7 @@ def test_choosing_hide_preview_hides_the_preview_pane(sample_tree):
     (sample_tree / "readme.txt").write_text("zzqMARKERzz")
     fm = FileManager(sample_tree)
     _open_root_tab(fm)
+    fm._toggle_preview()  # hidden by default; show it first so hiding it means something
     x, y = _find_row(fm, "readme.txt")
     _click(fm, x, y)
     assert "zzqMARKERzz" in fm.app.screen()
@@ -102,12 +103,13 @@ def test_hide_preview_menu_item_is_the_same_toggle_the_p_key_uses(sample_tree):
     state -- choosing it, then pressing `p`, ends up back where it started
     rather than double-toggling or diverging."""
     fm = FileManager(sample_tree)
+    assert fm.preview_visible is False  # hidden by default
     fm.step(_alt("v"))
     fm.step({"MenuActivated": MENU_VIEW_PREVIEW_ID})
-    assert fm.preview_visible is False
+    assert fm.preview_visible is True
 
     fm.step(_key_event({"Char": "p"}))
-    assert fm.preview_visible is True
+    assert fm.preview_visible is False
 
 
 def test_tab_does_nothing_once_the_sidebar_is_hidden(sample_tree):

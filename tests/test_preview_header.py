@@ -9,7 +9,12 @@ from quadraui_files.app import ENTER_KEY, _key_event
 
 
 def _open_root_tab(fm: FileManager) -> None:
+    """Opens the root folder as a details tab *and* shows the preview pane
+    -- hidden by default now (View menu / `p`), but every test in this
+    file is specifically about its header, so showing it is part of this
+    file's own "open the tab" setup, not something each test repeats."""
     fm.step(_key_event(ENTER_KEY))
+    fm._toggle_preview()
 
 
 def _press_char(fm: FileManager, char: str) -> None:

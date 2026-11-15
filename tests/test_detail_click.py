@@ -24,6 +24,7 @@ def test_single_click_on_a_file_row_selects_and_previews_without_opening(sample_
     (sample_tree / "readme.txt").write_text("zzqMARKERzz")
     fm = FileManager(sample_tree, width=120, height=30)
     _open_root_tab(fm)
+    fm._toggle_preview()  # hidden by default; this test is specifically about its content
 
     x, y = _find_row(fm, "readme.txt")
     _click(fm, x, y)

@@ -18,7 +18,12 @@ from quadraui_files.app import DELETE_KEY, ENTER_KEY, PREVIEW_MAX_BYTES, _key_ev
 
 
 def _open_root_tab(fm: FileManager) -> None:
+    """Opens the root folder as a details tab *and* shows the preview pane
+    -- hidden by default now (View menu / `p`), but every test in this
+    file is specifically about what's in it, so showing it is part of
+    this file's own "open the tab" setup, not something each test repeats."""
     fm.step(_key_event(ENTER_KEY))
+    fm._toggle_preview()
 
 
 def _write_tiny_png(path: Path, color: tuple[int, int, int] = (255, 0, 0)) -> None:

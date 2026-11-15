@@ -100,6 +100,9 @@ key focus -- the file list (the default), or the sidebar:
   click a details header   sort every open details table by that column
                             (marked with ▲/▼ on the active header); click
                             the same header again to reverse it
+  drag a details header's  resize that column (every open details table,
+    divider                 same as the sort above); the other columns'
+                            Flex ratios absorb the difference
   click a tab / its ×      switch to / close that tab
   click the preview header's × close the preview pane (same as pressing `p`
                             while it's shown)
@@ -851,6 +854,7 @@ def details_table(
     selected_idx: int | None = None,
     has_focus: bool = False,
     nerd_fonts_enabled: bool = False,
+    column_overrides: list[float | None] | None = None,
 ) -> dict:
     """The data_table descriptor for one opened folder's contents, as the
     content subtree of tab `index`. `children` is the rows' display order
@@ -871,7 +875,15 @@ def details_table(
     -- media/PDF/JSON/code/...), and with no Nerd Font there's nothing an
     ASCII marker would say that doesn't duplicate the trailing "/" a
     folder already carries, so it only appears once there's an actual
-    glyph to show."""
+    glyph to show. `column_overrides` is the same list `_on_column_resized`
+    builds from a real divider-drag (`DataTableEvent::ColumnResized`'s own
+    doc: "App should update `column_overrides[col]`") -- one entry per
+    column, `None` leaving that column's own `width` spec (the `Flex`
+    ratios below) in effect, a `float` pinning it to that many surface
+    units instead. Shared globally across every tab's own table (like
+    `ratio`/`sort_col`, not per-tab), so resizing a column in one tab
+    resizes it everywhere -- defaults to no overrides at all for a direct
+    caller (`--dump`, a test) that never passes one."""
     table_id = f"fm:grid:{index}"
     columns = [
         {"title": "Name", "width": {"Flex": 2.0}, "align": "Left"},
@@ -930,6 +942,7 @@ def details_table(
         # instead of overwriting the header/first column/last row -- same
         # fix as `TreeStyle.bordered` above (JDonaghy/quadraui#2447).
         "bordered": True,
+        "column_overrides": [None] * len(columns) if column_overrides is None else column_overrides,
     }
 
 
@@ -1723,7 +1736,7 @@ class FileManager:
         self.scroll = 0                 # index of the first painted sidebar row
         self.ratio = 0.2                # sidebar width fraction
         self.preview_ratio = 0.65       # details-vs-preview width fraction, within the body's second pane
-        self.preview_visible = True     # `p`/header-× toggle; preview_ratio is kept either way
+        self.preview_visible = False    # `p`/header-×/View menu toggle; preview_ratio is kept either way
         self.sidebar_visible = True     # View menu's Hide/Show Sidebar; `ratio` is kept either way
         # One entry per tab: the folder it shows, and its own Back/Forward
         # stacks (most recent last). There is always at least one tab.
@@ -1744,6 +1757,12 @@ class FileManager:
         self.filter_text = ""           # live search query; "" narrows nothing
         self.sort_col = 0               # details column last clicked (0 Name/1 Size/2 Modified)
         self.sort_reverse = False       # reversed by a second click on the same column
+        # One entry per details column (Name/Size/Modified/Kind), `None`
+        # leaving that column's own Flex ratio in effect -- a real divider
+        # drag's `ColumnResized` sets the dragged column's entry to its new
+        # width, shared globally across every tab's own table, same as
+        # `sort_col` above.
+        self.column_overrides: list[float | None] = [None, None, None, None]
         self.edit_mode: str | None = None  # None | "filter" | "rename": which box the bottom panel shows
         self.edit_text = ""             # live buffer for whichever box is open
         self.rename_target: Node | None = None  # node a "rename" edit_mode would commit onto
@@ -2520,6 +2539,16 @@ class FileManager:
             self.sort_col = col
             self.sort_reverse = False
         self.table_focus = True
+
+    def _on_column_resized(self, col: int, width: float) -> None:
+        """A real column-divider drag (`DataTableEvent::ColumnResized`):
+        pin that column to its new width -- `column_overrides` is
+        app-global, same as `sort_col`/`sort_reverse` above, so a resize in
+        one tab's table resizes every tab's. Engine-reported `col` is
+        always in range for this table's own column count; the bounds
+        check is defensive, not expected to ever fail."""
+        if 0 <= col < len(self.column_overrides):
+            self.column_overrides[col] = width
 
     def _select_detail(self, idx: int) -> None:
         """A details-table row was *selected* (a single click, or Up/Down
@@ -3404,6 +3433,7 @@ class FileManager:
                 selected_idx=selected_idx,
                 has_focus=is_active and self.table_focus and not self.edit_mode,
                 nerd_fonts_enabled=self._nerd_fonts_enabled,
+                column_overrides=self.column_overrides,
             )
 
         header_rows = self._chrome_line_height / self._line_height
@@ -3888,6 +3918,8 @@ class FileManager:
                 self._activate_detail(activation["RowActivated"]["idx"])
             elif "HeaderClicked" in activation:
                 self._on_header_clicked(activation["HeaderClicked"]["col"])
+            elif "ColumnResized" in activation:
+                self._on_column_resized(**activation["ColumnResized"])
         elif "Tree" in event:
             activation = event["Tree"][1]
             if "RowClicked" in activation:

@@ -54,7 +54,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T0** | File-list tabs + navigation (lazy-loaded, cross-backend) | ✅ seeded baseline |
 | **Sidebar** | Finder/Explorer/Nautilus places sidebar; Explorer-style tabs with history, address bar, open-in-place | ✅ macOS TUI; native + Windows/Linux verification pending (#42, #43) |
 | **T1** | Open / reveal / move-to-trash, context menu, delete-confirm dialog, undo toast | ✅ all backends ([known limits](#known-limits)) |
-| **T2** | Filter/search box, F2 rename, column sort | ✅ all backends ([known limits](#known-limits)) |
+| **T2** | Filter/search box, F2 rename, column sort + resize | ✅ all backends ([known limits](#known-limits)) |
 | **Preview** | Read-only preview pane for the selected file | ✅ all backends |
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
 | **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the sidebar and details rows | ✅ all backends; native manual verification pending |
