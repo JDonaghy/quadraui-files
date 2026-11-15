@@ -10,13 +10,14 @@ through the waker. The watcher itself (`_FolderSnapshot`) only stats one
 folder's own listing -- no OS-level watcher, no new dependency."""
 
 import os
+import shutil
 import time
 from pathlib import Path
 
 import pytest
 
 from quadraui_files import FileManager
-from quadraui_files.app import DOWN_KEY, ENTER_KEY, FS_WATCH_WAKE, _key_event
+from quadraui_files.app import DOWN_KEY, ENTER_KEY, FS_WATCH_WAKE, LEFT_KEY, _key_event
 
 
 def _touch(path: Path) -> None:
@@ -53,8 +54,6 @@ def test_an_external_delete_is_picked_up_and_clears_a_stale_selection(fm, sample
     fm.step(_key_event(DOWN_KEY))  # select the first row ("alpha/")
     assert fm.selected_file is not None
 
-    import shutil
-
     shutil.rmtree(sample_tree / "alpha")
 
     assert fm.fs_watch_if_changed() is True
@@ -67,6 +66,10 @@ def test_an_external_content_rewrite_is_also_a_change(fm, sample_tree):
     _touch(sample_tree / "readme.txt")
 
     assert fm.fs_watch_if_changed() is True
+    assert fm.cursor.load_error is False
+    screen = fm.app.screen()
+    assert "readme.txt" in screen
+    assert "reloaded" in fm.message
 
 
 def test_the_watcher_threads_wake_event_triggers_a_refresh(fm, sample_tree):
@@ -107,6 +110,24 @@ def test_switching_tabs_moves_the_watch_to_the_new_active_folder(fm, sample_tree
     (sample_tree / "alpha" / "added_after_drilling_in.txt").write_text("hi")
     assert fm.fs_watch_if_changed() is True
     assert "added_after_drilling_in.txt" in fm.app.screen()
+
+
+def test_left_goes_up_and_the_watch_does_not_clear_that_selection(sample_tree):
+    """A navigation (Up/Back/breadcrumb) pre-selects the folder just left --
+    see `tests/test_navigation.py`'s own coverage of that. With the watch
+    running, the first tick against the newly-active folder must not read
+    as "changed" (it was never watched before) and silently drop that
+    selection via a spurious `_refresh()`."""
+    fm = FileManager(sample_tree / "alpha", width=120, height=30)
+    fm.enable_fs_watch(interval=None)
+
+    fm.step(_key_event(LEFT_KEY))
+
+    assert fm.cursor.path == sample_tree
+    assert fm.selected_file is not None and fm.selected_file.name == "alpha"
+
+    assert fm.fs_watch_if_changed() is False
+    assert fm.selected_file is not None and fm.selected_file.name == "alpha"
 
 
 def test_enable_disable_cycle_starts_and_stops_the_watcher_thread(fm):

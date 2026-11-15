@@ -353,18 +353,25 @@ def _folder_signature(path: Path) -> tuple[tuple[str, int, int], ...] | None:
     by `FileManager.enable_fs_watch` to notice an external change (Finder,
     another terminal, `rm`/`mv`, ...) with no OS-level watcher (inotify/
     FSEvents/ReadDirectoryChangesW) and no new runtime dependency -- just a
-    `stat()` per entry, on the one folder the active tab is showing. Each
-    entry's (name, mtime, size), sorted so creation order doesn't matter --
-    changes on an add, a remove, a rename, or a rewrite of an entry's own
-    content/metadata. An entry that disappears mid-scan (a race with another
-    process's own delete/rename) is just skipped rather than failing the
-    whole signature. `None` means `path` itself can't be read right now (just
-    deleted, or a permission revoked); callers treat that as "nothing new to
-    report" -- `_report_load_error` is what surfaces that failure, the next
-    time something actually reloads this folder."""
+    `stat()` per entry, on the one folder the active tab is showing. Skips
+    dotfile entries, matching `load_children`'s own filtering, so hidden-file
+    churn the app never displays (Finder rewriting `.DS_Store`, `.git`
+    changing during other work in the same folder) doesn't trigger a visible
+    refresh; a visible<->hidden rename still changes the visible set either
+    way. Each remaining entry's (name, mtime, size), sorted so creation order
+    doesn't matter -- changes on an add, a remove, a rename, or a rewrite of
+    an entry's own content/metadata. An entry that disappears mid-scan (a
+    race with another process's own delete/rename) is just skipped rather
+    than failing the whole signature. `None` means `path` itself can't be
+    read right now (just deleted, or a permission revoked); callers treat
+    that as "nothing new to report" for the purpose of noticing a change --
+    `_report_load_error` is what surfaces that failure, the next time
+    something actually reloads this folder."""
     try:
         listing = []
         for entry in os.scandir(path):
+            if entry.name.startswith("."):
+                continue
             try:
                 stat = entry.stat(follow_symlinks=False)
             except OSError:
@@ -378,29 +385,34 @@ def _folder_signature(path: Path) -> tuple[tuple[str, int, int], ...] | None:
 class _FolderSnapshot:
     """The baseline `FileManager.enable_fs_watch` diffs the active folder
     against -- the filesystem-watch analogue of `ModuleWatcher` (quadraui's
-    hot-reload baseline). Split the same way: `changed()` only compares,
-    `snapshot()` is the explicit re-arm, done after a change is actually
-    acted on (see `FileManager.fs_watch_if_changed`)."""
+    hot-reload baseline). Keeps one baseline *per path*, not just the most
+    recently watched one, so a tab switch or a drill-down to a folder this
+    session has never watched before doesn't itself read as "changed" --
+    `changed()` takes that folder's first baseline silently and reports
+    nothing new. A folder this session *has* watched before (switch away
+    and back) keeps comparing against its own last-known listing, so a real
+    external edit made while a different tab was active is still caught the
+    moment this one becomes active again -- the only thing a navigation-time
+    check needs to buy."""
 
     def __init__(self) -> None:
-        self._path: Path | None = None
-        self._signature: tuple[tuple[str, int, int], ...] | None = None
+        self._signatures: dict[Path, tuple[tuple[str, int, int], ...] | None] = {}
 
     def snapshot(self, path: Path) -> None:
-        """Record `path`'s current listing as the baseline."""
-        self._path = path
-        self._signature = _folder_signature(path)
+        """Record (or re-arm) `path`'s current listing as its baseline."""
+        self._signatures[path] = _folder_signature(path)
 
     def changed(self, path: Path) -> bool:
-        """Read-only: `True` when `path`'s listing differs from the
-        baseline, or when `path` itself isn't the folder last snapshotted --
-        a tab switch or a drill-down needs its own baseline taken, which
-        reads as "changed" here too so the first check after moving there
-        takes one (see `fs_watch_if_changed`), the same as a real external
-        edit would. Does not update the baseline itself."""
-        if path != self._path:
-            return True
-        return _folder_signature(path) != self._signature
+        """`True` when `path`'s listing differs from its last-recorded
+        baseline. A `path` with no baseline yet takes one now and reports no
+        change -- arriving somewhere isn't itself an edit. Otherwise
+        read-only: comparing against an existing baseline never updates it;
+        `snapshot()` is the explicit re-arm, done after a change is actually
+        acted on (see `FileManager.fs_watch_if_changed`)."""
+        if path not in self._signatures:
+            self.snapshot(path)
+            return False
+        return _folder_signature(path) != self._signatures[path]
 
 
 def _reparent_paths(node: Node) -> None:
@@ -3507,11 +3519,16 @@ class FileManager:
     # every open tab or every loaded-but-not-shown `Node`. Switching tabs or
     # drilling into a subfolder moves the watch there on the very next tick
     # (`_fs_watch_loop` re-reads `self.cursor.path` each time, not a path
-    # captured once at `enable_fs_watch` time) and takes a fresh baseline
-    # rather than diffing against the folder left behind -- which also means
-    # the first tick after a navigation always reads as "changed" and
-    # refreshes once more, harmlessly, same as pressing `r` right after
-    # arriving somewhere new would be.
+    # captured once at `enable_fs_watch` time). `_FolderSnapshot` keeps one
+    # baseline per path rather than just the most recent one, so landing on
+    # a folder this session hasn't watched before (a plain navigation) takes
+    # a silent first baseline instead of reading as "changed" -- a
+    # navigation must not itself trigger `_refresh()`, which would stomp the
+    # selection `_go_up`/`_navigate(select=...)` just set (see
+    # `tests/test_navigation.py`). A folder watched before and revisited
+    # still compares against its own last-known listing, so an edit made
+    # while a different tab was active is caught the moment this one
+    # becomes active again.
 
     def enable_fs_watch(self, interval: float | None = 1.0) -> None:
         """Watch the active tab's own folder for changes made outside this
@@ -3556,12 +3573,21 @@ class FileManager:
         change is the same safety net `_watch_loop`'s own doc describes: a
         wake a backend drops or coalesces still gets a fresh one next tick,
         since `changed()` stays `True` until something actually re-arms the
-        baseline (`fs_watch_if_changed`)."""
+        baseline (`fs_watch_if_changed`). `self.cursor` reads `self.open`/
+        `self.active_tab`, both mutated on the run loop's own thread (e.g.
+        `_close_tab`); the tiny window between the two mutations could raise
+        `IndexError` here, which would otherwise kill this daemon thread for
+        the rest of the session, so a tick that hits any transient error
+        just waits for the next one instead of propagating."""
         while not stop.wait(interval):
             watcher = self._fw_watcher
             if watcher is None:
                 continue
-            if watcher.changed(self.cursor.path):
+            try:
+                changed = watcher.changed(self.cursor.path)
+            except Exception:
+                continue
+            if changed:
                 waker.post(FS_WATCH_WAKE)
 
     def fs_watch_if_changed(self) -> bool:
