@@ -1,6 +1,7 @@
-"""#56 black-box coverage: Finder-style search. `cmd+f`/`ctrl+f` (or File >
-Find…) opens a search box; Enter opens a search tab whose listing is every
-match below the folder, with a Where column; the tab's address bar toggles
+"""#56 black-box coverage: Finder-style search. Every tab's address bar
+carries an always-visible search field; `cmd+f`/`ctrl+f`, File > Find… or a
+click gives it the keyboard, and typing searches live -- a search tab opens
+whose listing is every match below the folder, with a Where column; the tab's address bar toggles
 the scope between that folder and This Mac (Spotlight -- stubbed here, since
 the suite can't depend on a real Spotlight index). The search itself runs
 on a worker thread and hands results over through a waker wake, so these
@@ -103,16 +104,55 @@ def test_results_show_where_each_one_lives(search_tree):
     assert fm.app.screen_contains("beta")
 
 
-def test_the_search_box_says_where_it_will_look_and_escape_cancels_it(search_tree):
+def test_the_search_field_is_always_in_the_address_bar(search_tree):
+    fm = _fm(search_tree)
+    assert "⌕ Search" in fm.app.screen()
+    fm.step(_key_event({"Char": "t"}))  # a second tab has its own
+    assert "⌕ Search" in fm.app.screen()
+
+
+def test_clicking_the_field_and_typing_searches_live(search_tree):
+    fm = _fm(search_tree)
+    click(fm, *find_row(fm, "⌕ Search"))
+    assert fm.edit_mode == "search"
+
+    _type(fm, "rep")
+    assert fm.cursor.search is not None, "the first keystroke should open the search tab"
+    assert "⌕ rep" in fm.app.screen()
+    _settle(fm)
+    assert "report.txt" in _results(fm)
+
+    _type(fm, "orts")  # the same tab narrows as the query grows
+    _settle(fm)
+    assert len(fm.open) == 2
+    assert _results(fm) == ["reports"]
+
+
+def test_escape_with_nothing_typed_opens_no_tab(search_tree):
+    fm = _fm(search_tree)
+    fm.step(CTRL_F_EVENT)
+    fm.step(_key_event(ESCAPE_KEY))
+    assert fm.edit_mode is None
+    assert len(fm.open) == 1
+
+
+def test_escape_in_the_field_ends_the_search(search_tree):
     fm = _fm(search_tree)
     fm.step(CTRL_F_EVENT)
     _type(fm, "rep")
-
-    assert f"Search in {search_tree.name}: rep" in fm.app.screen()
-
     fm.step(_key_event(ESCAPE_KEY))
+
+    assert len(fm.open) == 1
+    assert fm.cursor.path == search_tree
+    assert "⌕ Search" in fm.app.screen()
+
+
+def test_enter_keeps_the_results_and_returns_keys_to_the_list(search_tree):
+    fm = _fm(search_tree)
+    _search(fm, "report")
     assert fm.edit_mode is None
-    assert len(fm.open) == 1, "a cancelled search must not open a tab"
+    assert fm.table_focus is True
+    assert "⌕ report" in fm.app.screen()
 
 
 def test_find_from_a_search_tab_starts_from_its_query(search_tree):

@@ -82,10 +82,12 @@ key focus -- the file list (the default), or the sidebar:
   ⌘C / ^C      copy the selected row to this app's own clipboard
   ⌘V / ^V      paste into the folder being browsed
   ⌘I / ^I      Get Info for the selected row
-  ⌘F / ^F      Find: type a name, Enter opens a search tab listing every
-               match below the browsed folder (or, on macOS, across This
-               Mac via Spotlight -- the tab's address bar toggles), with a
-               Where column; `r` re-runs it, `w` closes it
+  ⌘F / ^F      Find: focus the address bar's search field (or click it).
+               Typing searches live in a search tab listing every match
+               below the browsed folder (or, on macOS, across This Mac via
+               Spotlight -- the tab's address bar toggles), with a Where
+               column. Enter returns keys to the list, Esc ends the search;
+               `r` re-runs it, `w` closes it
   /            open the bottom filter box; typing narrows every open
                details table live, Enter closes the box (filter stays
                applied), Esc closes it and clears the filter
@@ -449,6 +451,7 @@ SEARCH_WAKE = "quadraui_files.search"
 SEARCH_SCOPE_FOLDER = "folder"
 SEARCH_SCOPE_MAC = "mac"
 SEARCH_SCOPE_ACTION_PREFIX = "fm:search:scope:"
+SEARCH_FIELD_ACTION = "fm:search:field"  # the address bar's search field, see `_search_field_segment`
 SEARCH_RESULT_CAP = 1000  # past this many hits the search stops, like a capped Finder window
 _SEARCH_POST_INTERVAL = 0.15  # seconds between wakes while results stream in
 
@@ -3292,21 +3295,27 @@ class FileManager:
         return search.root if search is not None else self.cursor
 
     def _start_search(self) -> None:
-        """Find (`cmd+f`/`ctrl+f`, File > Find…): open the bottom box for a
-        search query. From a search tab it's seeded with that search's query,
-        and committing it re-runs the search in place (Finder edits the
-        search you're looking at rather than stacking a new window)."""
+        """Find (`cmd+f`/`ctrl+f`, File > Find…, or a click on the address
+        bar's search field): give the field the keyboard. Searching is live,
+        as in Finder -- see `_search_live`. From a search tab the field
+        starts from that search's query, and editing it re-runs the search
+        in place rather than stacking a new tab. Enter keeps the results and
+        hands the keyboard back to the list; Esc ends the search."""
         search = _search_of(self.cursor)
         self.edit_mode = "search"
         self.edit_text = search.query if search is not None else ""
 
-    def _commit_search(self, query: str) -> None:
-        query = query.strip()
+    def _search_live(self, text: str) -> None:
+        """Every keystroke in the search field: the first one opens a search
+        tab on the browsed folder, later ones re-run that tab's search. An
+        emptied field leaves the last results up; Esc is what ends it."""
+        query = text.strip()
         if not query:
             return
         search = _search_of(self.cursor)
         if search is not None:
-            self._run_search(self.cursor, query, search.scope, search.root)
+            if query != search.query:
+                self._run_search(self.cursor, query, search.scope, search.root)
             return
         root = self.cursor
         node = Node(name=query, path=root.path, is_dir=True, children=[])
@@ -3486,11 +3495,15 @@ class FileManager:
         self.edit_text += text
         if self.edit_mode == "filter":
             self.filter_text = self.edit_text
+        elif self.edit_mode == "search":
+            self._search_live(self.edit_text)
 
     def _edit_backspace(self) -> None:
         self.edit_text = self.edit_text[:-1]
         if self.edit_mode == "filter":
             self.filter_text = self.edit_text
+        elif self.edit_mode == "search":
+            self._search_live(self.edit_text)
 
     def _handle_edit_key(self, event: dict) -> bool:
         """Key events while the filter/rename box is open go through here
@@ -3544,7 +3557,7 @@ class FileManager:
         if was_renaming:
             self._rename(self.rename_target, self.edit_text)
         elif self.edit_mode == "search":
-            self._commit_search(self.edit_text)
+            self.table_focus = True  # results stay; the keyboard goes back to the list
         self.edit_mode = None
         self.rename_target = None
         self.edit_text = ""
@@ -3558,6 +3571,8 @@ class FileManager:
         was_renaming = self.edit_mode == "rename"
         if self.edit_mode == "filter":
             self.filter_text = ""
+        elif self.edit_mode == "search" and _search_of(self.cursor) is not None:
+            self._close_tab(self.active_tab)  # Finder: Esc in the field ends the search
         self.edit_mode = None
         self.rename_target = None
         self.edit_text = ""
@@ -4377,6 +4392,20 @@ class FileManager:
             node = node.parent
         return chain[::-1]
 
+    def _search_field_segment(self, folder: Node) -> dict:
+        """Finder's always-visible toolbar search field, at the right end of
+        every tab's address bar (#56). A clickable status-bar segment rather
+        than a `text_input`: quadraui's text input is always bordered, three
+        rows tall even on the TUI, which a one-row bar can't hold. Shows the
+        live query with a caret while the field has the keyboard, the
+        search's own query on a search tab, else a placeholder."""
+        search = _search_of(folder)
+        if self.edit_mode == "search":
+            return self._segment(f" ⌕ {self.edit_text}▏ ", accent=True, bold=True)
+        if search is not None:
+            return self._segment(f" ⌕ {search.query} ", accent=True, action_id=SEARCH_FIELD_ACTION)
+        return self._segment(" ⌕ Search ", action_id=SEARCH_FIELD_ACTION)
+
     def _address_leaf(self, index: int, folder: Node) -> dict:
         """One tab's address bar: the folder's path as clickable breadcrumbs
         (Explorer's address bar / Finder's path bar). A `status_bar` because
@@ -4406,7 +4435,11 @@ class FileManager:
                 )
             return {
                 "id": f"fm:addr:{index}",
-                "status_bar": {"id": f"fm:addr:{index}", "left_segments": segments, "right_segments": []},
+                "status_bar": {
+                    "id": f"fm:addr:{index}",
+                    "left_segments": segments,
+                    "right_segments": [self._search_field_segment(folder)],
+                },
             }
         chain: list[Node] = []
         node: Node | None = folder
@@ -4428,7 +4461,11 @@ class FileManager:
             )
         return {
             "id": f"fm:addr:{index}",
-            "status_bar": {"id": f"fm:addr:{index}", "left_segments": segments, "right_segments": []},
+            "status_bar": {
+                "id": f"fm:addr:{index}",
+                "left_segments": segments,
+                "right_segments": [self._search_field_segment(folder)],
+            },
         }
 
     def _details_pane(self) -> dict:
@@ -4702,10 +4739,7 @@ class FileManager:
         """The outer split's bottom pane while the filter/rename box is
         open: a live text_input showing its label and buffer, swapped in
         for the status bar."""
-        if self.edit_mode == "search":
-            label = f"Search in {self._folder_label(self._search_root())}"
-        else:
-            label = "Filter" if self.edit_mode == "filter" else "Rename"
+        label = "Filter" if self.edit_mode == "filter" else "Rename"
         text = f"{label}: {self.edit_text}"
         return {
             "id": "fm:edit",
@@ -4795,7 +4829,8 @@ class FileManager:
         first_min = 3.0
         available_for_bottom = max(1.0, h - first_min)
         status_rows = self._chrome_line_height / self._line_height
-        bottom_rows = min(3.0, available_for_bottom) if self.edit_mode else min(status_rows, available_for_bottom)
+        boxed = self.edit_mode in ("filter", "rename")  # Find types into the address bar's own field
+        bottom_rows = min(3.0, available_for_bottom) if boxed else min(status_rows, available_for_bottom)
         outer = {
             "split": {
                 "id": "fm:outer",
@@ -4804,7 +4839,7 @@ class FileManager:
                 "first_min": first_min,
                 "second_min": bottom_rows,
                 "first": body,
-                "second": self._edit_leaf() if self.edit_mode else self._status_leaf(),
+                "second": self._edit_leaf() if boxed else self._status_leaf(),
             }
         }
         h_total = max(self.height, 2.0)
@@ -5009,6 +5044,9 @@ class FileManager:
                 clicked_id = activation["SegmentClicked"]["id"]
                 if clicked_id == PREVIEW_HEADER_CLOSE_ACTION:
                     self.preview_visible = False
+                elif clicked_id == SEARCH_FIELD_ACTION:
+                    if self.edit_mode is None:
+                        self._start_search()
                 elif clicked_id.startswith(SEARCH_SCOPE_ACTION_PREFIX):
                     self._set_search_scope(clicked_id[len(SEARCH_SCOPE_ACTION_PREFIX):])
                 elif clicked_id.startswith(CRUMB_ACTION_PREFIX):

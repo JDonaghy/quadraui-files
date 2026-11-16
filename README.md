@@ -77,7 +77,7 @@ bootstrap. `git` then reports `.venv/bin/activate` as modified until
 | **T3** | OS-theme match, keybindings, notifications | ✅ all backends |
 | **Hover tooltips** | Delayed show/auto-dismiss pointer-hover tooltips on the sidebar and details rows | ✅ all backends; native manual verification pending |
 | **T4** | Window title + dirty-dot + tray + cursor shapes (native) | ✅ landed; native manual verification pending |
-| **Search** | `⌘F`/File > Find…: a search tab over subfolders, or This Mac via Spotlight on macOS, with a Where column (#56) | ✅ TUI; native + Spotlight manual verification pending |
+| **Search** | Always-visible search field in the address bar (`⌘F`/click); live search tab over subfolders, or This Mac via Spotlight on macOS, with a Where column (#56) | ✅ TUI; native + Spotlight manual verification pending |
 | **Menu bar** | A real menu bar (`Alt+<letter>`/click, arrow nav, Esc) -- File > New Folder/New Tab/Find…, View > Hide/Show Sidebar, Hide/Show Preview | ✅ TUI; native macOS fixed upstream, awaiting a quadraui release (JDonaghy/quadraui#2560, see [known limits](#known-limits)) |
 
 Hover tooltips work on every backend, TUI, headless and native alike. They're driven by
@@ -158,14 +158,17 @@ With a Nerd Font available, each grid row leads its name with a type-specific
 codicon marker (media, PDF, zip, JSON, Markdown, source code, folder), matching
 the Kind column.
 
-Press `⌘F`/`Ctrl+F` (or File > Find…) to search: type a name and Enter opens a **search
-tab** listing every match below the folder you were browsing, each with a **Where**
-column, the way Finder's search window does. On macOS the tab's address bar toggles
-between that folder and **This Mac** (Spotlight's `mdfind`). Both match names only, and
-skip dotfiles. The search runs in the background and results stream in (it stops at
-1,000). Opening a folder result browses into it, and Back returns to the results. `r`
-re-runs the search and `w` closes the tab. Searching again from a search tab edits that
-search instead of opening another tab.
+Every tab's address bar ends in an always-visible **search field** (`⌕ Search`), the
+equivalent of Finder's toolbar search. Click it, or press `⌘F`/`Ctrl+F` (or File > Find…),
+and type. Search is live: the first letter opens a **search tab** listing every match below
+the folder you were browsing, each with a **Where** column, and it updates as you type.
+Enter keeps the results and gives the keyboard back to the list. Esc ends the search and
+closes the tab. On macOS the tab's address bar toggles between that folder and **This Mac**
+(Spotlight's `mdfind`). Both match names only, and skip dotfiles. Results stream in from
+a background search (it stops at 1,000). Opening a folder result browses into it, and Back
+returns to the results. `r` re-runs the search and `w` closes the tab. The field is drawn
+text, not a full text box, because quadraui's `text_input` is always bordered and three
+rows tall: you can type and Backspace, but you can't move the cursor or select text in it.
 
 Press `/` for a live filter box over the active details table (Esc clears it, Enter
 keeps it applied and closes the box), `F2` to inline-rename the selected row (Enter commits a real rename on disk, Esc cancels), and click a details

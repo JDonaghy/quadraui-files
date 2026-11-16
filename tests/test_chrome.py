@@ -150,7 +150,7 @@ def test_ctrl_f_accelerator_opens_the_search_box(sample_tree):
     fm = FileManager(sample_tree)
     fm.step(CTRL_F_EVENT)
     assert fm.edit_mode == "search"  # Finder's Find (#56); `/` is the live filter
-    assert "Search in" in fm.app.screen()
+    assert "⌕ ▏" in fm.app.screen()  # the address bar's field has the keyboard
 
 
 def test_f2_accelerator_opens_the_rename_box_for_the_cursored_folder(sample_tree):
