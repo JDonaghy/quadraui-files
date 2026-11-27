@@ -11,8 +11,6 @@ mirrors is covered by test_detail_click/test_keys_after_click."""
 
 from pathlib import Path
 
-from conftest import click as _click
-from conftest import find_row as _find_row
 from quadraui_files import FileManager
 from quadraui_files.app import DOWN_KEY, LEFT_KEY, RIGHT_KEY, UP_KEY, _key_event
 
@@ -74,14 +72,15 @@ def test_right_on_a_file_row_only_hints_at_enter(sample_tree):
     assert "press Enter" in fm.message
 
 
-def test_left_after_a_row_click_still_goes_up(sample_tree):
+def test_left_after_a_row_click_still_goes_up(sample_tree, h):
     """Left/Right are the two arrows the engine never rewrites, so they reach
     the app even with the table focused by a real click."""
     fm = FileManager(sample_tree, width=120, height=30)
+    ui = h(fm)
     fm.step(_key_event(DOWN_KEY))
     fm.step(_key_event(RIGHT_KEY))  # into alpha
 
-    _click(fm, *_find_row(fm, "notes.txt"))  # a real click focuses alpha's table
+    ui.find(role="data_table").row("notes.txt").click()  # focuses alpha's table
     fm.step(_key_event(LEFT_KEY))
 
     assert fm.cursor.path == sample_tree, "Left did not go up"

@@ -4,8 +4,8 @@ Duplicate, Copy/Paste, and Get Info -- driven headlessly through
 doc). `test_actions.py` keeps the original Open/Reveal/Move to Trash
 coverage; this file is the "fuller context menu" VISION.md backlog item."""
 
-from conftest import click as _click
-from conftest import find_row as _find_row
+from conftest import pointer as _pointer
+from quadraui.testing import Harness
 
 from quadraui_files import FileManager
 from quadraui_files.app import ENTER_KEY, MENU_KEY, _key_event
@@ -17,11 +17,10 @@ def _open_root_tab(fm: FileManager) -> None:
     fm.step(_key_event(ENTER_KEY))
 
 
-def _select(fm: FileManager, name: str) -> None:
-    """A real synthesized single click on `name`'s row -- selects it and
-    gives the table focus, same as `test_detail_click.py`'s own clicks."""
-    x, y = _find_row(fm, name)
-    _click(fm, x, y)
+def _select(ui: Harness, name: str) -> None:
+    """A single click on `name`'s row -- selects it and gives the table
+    focus, same as `test_detail_click.py`'s own clicks."""
+    ui.find(role="data_table").row(name).click()
 
 
 def _accel(accel_id: str) -> dict:
@@ -31,17 +30,26 @@ def _accel(accel_id: str) -> dict:
     return {"Accelerator": [accel_id, {"shift": False, "ctrl": False, "alt": False, "cmd": False}]}
 
 
-_NO_MODS = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
+def _right_click(ui: Harness, text: str) -> None:
+    """A real synthesized right-button `MouseDown`/`MouseUp` pair on
+    wherever `text` painted -- unlike `conftest.click`, which always sends
+    `"Left"`. Only meaningful off a row (`_dispatch`'s own `"MouseUp"`
+    branch): a right-click *on* a row still can't be told apart from a left
+    one (JDonaghy/quadraui#2555)."""
+    _pointer(ui, text, button="Right")
 
 
-def _right_click(fm: FileManager, x: float, y: float) -> None:
-    """A real synthesized right-button `MouseDown`/`MouseUp` pair -- unlike
-    `conftest.click`, which always sends `"Left"`. Only meaningful off a
-    row (`_dispatch`'s own `"MouseUp"` branch): a right-click *on* a row
-    still can't be told apart from a left one (JDonaghy/quadraui#2555)."""
-    for kind in ("MouseDown", "MouseUp"):
-        fm.app.push_event({kind: {"position": {"x": x, "y": y}, "button": "Right", "modifiers": _NO_MODS}})
-        fm.app.step()
+def _right_click_empty_grid_space(ui: Harness) -> None:
+    """A real right-click below the details grid's last row -- deliberately
+    off every row, with no text of its own for `pointer()` to anchor on, so
+    the position is derived from the last row's own painted text instead of
+    a literal coordinate."""
+    last_row = ui.find(role="data_table").rows[-1]
+    x, y = ui.locate_all(last_row.cells[0].strip())[0]
+    position = {"x": x, "y": y + 1.0}
+    modifiers = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
+    ui.dispatch({"MouseDown": {"position": position, "button": "Right", "modifiers": modifiers}})
+    ui.dispatch({"MouseUp": {"position": position, "button": "Right"}})
 
 
 def _names(fm: FileManager) -> list[str]:
@@ -75,13 +83,14 @@ def test_new_folder_numbers_on_a_name_collision(sample_tree):
     assert (sample_tree / "untitled folder 2").is_dir()
 
 
-def test_new_folder_acts_on_the_browsed_folder_not_the_selection(sample_tree):
+def test_new_folder_acts_on_the_browsed_folder_not_the_selection(sample_tree, h):
     """Selecting "alpha" and choosing New Folder from its context menu must
     still create inside the root being browsed, not inside alpha -- the one
     exception `_request_context_menu`'s own doc calls out."""
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "alpha")
+    _select(ui, "alpha")
 
     fm.step(_key_event(MENU_KEY))
     fm.step({"ContextMenuItemActivated": "new_folder"})
@@ -93,11 +102,12 @@ def test_new_folder_acts_on_the_browsed_folder_not_the_selection(sample_tree):
 # --- Duplicate -----------------------------------------------------------
 
 
-def test_duplicate_a_file_makes_a_named_copy_and_selects_it(sample_tree):
+def test_duplicate_a_file_makes_a_named_copy_and_selects_it(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_accel("fm:accel:duplicate"))
 
@@ -106,23 +116,25 @@ def test_duplicate_a_file_makes_a_named_copy_and_selects_it(sample_tree):
     assert fm.selected_file is not None and fm.selected_file.name == "readme copy.txt"
 
 
-def test_duplicate_twice_numbers_the_second_copy(sample_tree):
+def test_duplicate_twice_numbers_the_second_copy(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_accel("fm:accel:duplicate"))
-    _select(fm, "readme.txt")  # back onto the original, not the copy just made
+    _select(ui, "readme.txt")  # back onto the original, not the copy just made
     fm.step(_accel("fm:accel:duplicate"))
 
     assert "readme copy 2.txt" in _names(fm)
 
 
-def test_duplicate_a_folder_copies_its_whole_contents(sample_tree):
+def test_duplicate_a_folder_copies_its_whole_contents(sample_tree, h):
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "alpha")
+    _select(ui, "alpha")
 
     fm.step(_accel("fm:accel:duplicate"))
 
@@ -142,11 +154,12 @@ def test_duplicate_with_nothing_selected_reports_a_message_and_does_not_raise(sa
 # --- Copy / Paste ----------------------------------------------------------
 
 
-def test_copy_then_paste_into_a_different_folder_keeps_the_name(sample_tree):
+def test_copy_then_paste_into_a_different_folder_keeps_the_name(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
     fm.step(_accel("fm:accel:copy_cmd"))
 
     fm._navigate(fm._node_for(sample_tree / "alpha"))
@@ -157,11 +170,12 @@ def test_copy_then_paste_into_a_different_folder_keeps_the_name(sample_tree):
     assert (sample_tree / "readme.txt").exists(), "Copy must not remove the original"
 
 
-def test_paste_into_the_same_folder_numbers_like_duplicate(sample_tree):
+def test_paste_into_the_same_folder_numbers_like_duplicate(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_accel("fm:accel:copy_cmd"))
     fm.step(_accel("fm:accel:paste_cmd"))
@@ -178,11 +192,12 @@ def test_paste_with_an_empty_clipboard_reports_a_message_and_does_not_raise(samp
     assert "nothing to paste" in fm.message
 
 
-def test_context_menu_paste_item_only_appears_after_a_copy(sample_tree):
+def test_context_menu_paste_item_only_appears_after_a_copy(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_key_event(MENU_KEY))
     assert "Paste" not in fm.app.screen()
@@ -196,11 +211,12 @@ def test_context_menu_paste_item_only_appears_after_a_copy(sample_tree):
 # --- Get Info --------------------------------------------------------------
 
 
-def test_get_info_shows_kind_size_dates_and_permissions(sample_tree):
+def test_get_info_shows_kind_size_dates_and_permissions(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello world")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_accel("fm:accel:get_info_cmd"))
 
@@ -213,10 +229,11 @@ def test_get_info_shows_kind_size_dates_and_permissions(sample_tree):
     assert "Permissions:" in screen
 
 
-def test_get_info_on_a_folder_shows_an_item_count_instead_of_a_size(sample_tree):
+def test_get_info_on_a_folder_shows_an_item_count_instead_of_a_size(sample_tree, h):
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "alpha")
+    _select(ui, "alpha")
 
     fm.step(_accel("fm:accel:get_info_cmd"))
 
@@ -237,11 +254,12 @@ def test_get_info_with_nothing_selected_reports_a_message_and_does_not_raise(sam
 # --- context menu contents --------------------------------------------------
 
 
-def test_context_menu_lists_the_newer_items_too(sample_tree):
+def test_context_menu_lists_the_newer_items_too(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_key_event(MENU_KEY))
     screen = fm.app.screen()
@@ -249,11 +267,12 @@ def test_context_menu_lists_the_newer_items_too(sample_tree):
         assert label in screen, f"{label!r} missing from the context menu:\n{screen}"
 
 
-def test_context_menu_rename_item_opens_the_rename_box(sample_tree):
+def test_context_menu_rename_item_opens_the_rename_box(sample_tree, h):
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")
+    _select(ui, "readme.txt")
 
     fm.step(_key_event(MENU_KEY))
     fm.step({"ContextMenuItemActivated": "rename"})
@@ -265,7 +284,7 @@ def test_context_menu_rename_item_opens_the_rename_box(sample_tree):
 # --- a real right-click, where it's actually possible today ----------------
 
 
-def test_right_click_on_empty_grid_space_opens_the_context_menu(sample_tree):
+def test_right_click_on_empty_grid_space_opens_the_context_menu(sample_tree, h):
     """A right-click that lands on the grid's own empty space (below/
     between rows) still carries its real `button` all the way through --
     unlike one that lands on a row, which can't be told apart from a left
@@ -275,37 +294,39 @@ def test_right_click_on_empty_grid_space_opens_the_context_menu(sample_tree):
     elsewhere in the tab."""
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
-    _select(fm, "readme.txt")  # something *is* selected elsewhere
+    _select(ui, "readme.txt")  # something *is* selected elsewhere
 
-    _right_click(fm, 50.0, 15.0)  # empty space below the listed rows
+    _right_click_empty_grid_space(ui)  # empty space below the listed rows
 
     assert fm._menu_target is not None and fm._menu_target.name == fm.cursor.name
     assert "New Folder" in fm.app.screen()
 
 
-def test_right_click_on_a_row_still_cannot_open_the_context_menu(sample_tree):
+def test_right_click_on_a_row_still_cannot_open_the_context_menu(sample_tree, h):
     """The still-blocked case: right-clicking an actual row resolves
     identically to a left click (`RowSelected`, no button carried), so no
     menu opens -- documents today's real limit rather than silently
     passing because the assertion is too loose."""
     (sample_tree / "readme.txt").write_text("hello")
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
 
-    x, y = _find_row(fm, "readme.txt")
-    _right_click(fm, x, y)
+    _right_click(ui, "readme.txt")
 
     assert fm._menu_target is None
     assert fm.selected_file is not None and fm.selected_file.name == "readme.txt"
 
 
-def test_right_click_on_empty_grid_space_is_suppressed_while_editing(sample_tree):
+def test_right_click_on_empty_grid_space_is_suppressed_while_editing(sample_tree, h):
     fm = FileManager(sample_tree)
+    ui = h(fm)
     _open_root_tab(fm)
     fm._start_filter()
 
-    _right_click(fm, 50.0, 15.0)
+    _right_click_empty_grid_space(ui)
 
     assert fm._menu_target is None
     assert fm.edit_mode == "filter"
