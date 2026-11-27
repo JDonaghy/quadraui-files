@@ -21,34 +21,6 @@ def _press_char(fm: FileManager, char: str) -> None:
     fm.step(_key_event({"Char": char}))
 
 
-def _click(fm: FileManager, x: float, y: float) -> None:
-    no_mods = {"shift": False, "ctrl": False, "alt": False, "cmd": False}
-    for kind in ("MouseDown", "MouseUp"):
-        fm.app.push_event({kind: {"position": {"x": x, "y": y}, "button": "Left", "modifiers": no_mods}})
-        fm.app.step()
-
-
-def _find(fm: FileManager, needle: str) -> tuple[int, int]:
-    """(x, y) of `needle`'s first occurrence on the painted screen."""
-    for y, line in enumerate(fm.app.screen().splitlines()):
-        x = line.find(needle)
-        if x >= 0:
-            return x, y
-    raise AssertionError(f"{needle!r} not found on screen:\n{fm.app.screen()}")
-
-
-def _find_header_close(fm: FileManager) -> tuple[int, int]:
-    """(x, y) of the preview header's own × -- the *rightmost* one on its
-    row, since an open tab's own closable × paints on that same screen
-    row, further left (the tabs bar and the preview header sit side by
-    side, at the top of the details|preview split)."""
-    for y, line in enumerate(fm.app.screen().splitlines()):
-        x = line.rfind("×")
-        if x >= 0:
-            return x, y
-    raise AssertionError(f"no × on screen:\n{fm.app.screen()}")
-
-
 def test_empty_state_header_says_no_file_selected(sample_tree):
     # A realistic window, not the 100-column default -- see
     # `test_header_shows_name_and_size_above_the_preview_text`'s own doc for
@@ -67,7 +39,7 @@ def test_empty_state_header_says_no_file_selected(sample_tree):
     assert header_y < body_y, f"header isn't above the body hint:\n{screen}"
 
 
-def test_header_shows_name_and_size_above_the_preview_text(sample_tree):
+def test_header_shows_name_and_size_above_the_preview_text(sample_tree, h):
     (sample_tree / "readme.txt").write_text("zzqMARKERzz")
     # A realistic window, not the 100-column default: `fm:split`'s own
     # padding and `fm:detail_split`'s own gap each cost the preview column
@@ -75,15 +47,16 @@ def test_header_shows_name_and_size_above_the_preview_text(sample_tree):
     # 100-column default leaves too little budget left over for this
     # 10-character name to survive unellipsized.
     fm = FileManager(sample_tree, width=120)
+    ui = h(fm)
     _open_root_tab(fm)
 
     _activate_child(fm, "readme.txt")
 
-    screen = fm.app.screen()
+    screen = ui.screen()
     size = f"{(sample_tree / 'readme.txt').stat().st_size} B"
-    name_y = _find(fm, "readme.txt")[1]
-    size_y = _find(fm, size)[1]
-    content_y = _find(fm, "zzqMARKERzz")[1]
+    name_y = ui.locate_all("readme.txt")[0][1]
+    size_y = ui.locate_all(size)[0][1]
+    content_y = ui.locate_all("zzqMARKERzz")[0][1]
     assert name_y == size_y, f"name and size aren't on the same header line:\n{screen}"
     assert name_y < content_y, f"header isn't above the preview text:\n{screen}"
 
@@ -138,16 +111,19 @@ def test_p_twice_restores_the_pane(sample_tree):
     assert fm.preview_visible is True
 
 
-def test_clicking_the_header_close_control_hides_the_pane(sample_tree):
+def test_clicking_the_header_close_control_hides_the_pane(sample_tree, h):
     (sample_tree / "readme.txt").write_text("zzqMARKERzz")
     fm = FileManager(sample_tree, width=120, height=30)
+    ui = h(fm)
     _open_root_tab(fm)
     _activate_child(fm, "readme.txt")
-    assert "zzqMARKERzz" in fm.app.screen()
+    assert "zzqMARKERzz" in ui.screen()
 
-    x, y = _find_header_close(fm)
-    _click(fm, float(x), float(y))
+    # The *rightmost* "×" on screen: an open tab's own closable × paints on
+    # the same screen row, further left (the tabs bar and the preview
+    # header sit side by side, at the top of the details|preview split).
+    ui.click_text("×", nth=-1)
 
-    screen = fm.app.screen()
+    screen = ui.screen()
     assert fm.preview_visible is False
     assert "zzqMARKERzz" not in screen, f"preview text still showing once closed:\n{screen}"
