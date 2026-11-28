@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-@dataclass
+@dataclass(frozen=True)
 class Place:
     """One sidebar entry: a folder the platform's own file manager pins
     there (Desktop, Downloads, a mounted volume, ...). `codicon` must be in
