@@ -18,8 +18,11 @@ def _open_root_tab(fm: FileManager) -> None:
 
 
 def _select(ui: Harness, name: str) -> None:
-    """A single click on `name`'s row -- selects it and gives the table
-    focus, same as `test_detail_click.py`'s own clicks."""
+    """A single click on `name`'s row -- selects it via the scoped
+    `RowSelected` the harness's `Row.click()` dispatches. Unlike a real
+    `MouseDown`/`MouseUp` pair (`test_detail_click.py`'s own clicks, or
+    `conftest.pointer()`), this does not move the engine's live focused id
+    to the table -- the tests in this file don't depend on that focus."""
     ui.find(role="data_table").row(name).click()
 
 

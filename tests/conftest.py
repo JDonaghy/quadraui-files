@@ -191,7 +191,10 @@ def h(quadraui_harness):
     """
 
     def build(fm: FileManager) -> Harness:
-        return quadraui_harness(fm.app, render=fm._render_frame)
+        # A trampoline, not a bound method -- same reason `app.py` installs
+        # one on `fm.app` itself: re-resolves `fm._render_frame` on every
+        # call, so a hot reload that swaps `fm.__class__` is still reflected.
+        return quadraui_harness(fm.app, render=lambda: fm._render_frame())
 
     return build
 
