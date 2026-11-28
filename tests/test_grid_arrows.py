@@ -11,6 +11,7 @@ mirrors is covered by test_detail_click/test_keys_after_click."""
 
 from pathlib import Path
 
+from conftest import pointer
 from quadraui_files import FileManager
 from quadraui_files.app import DOWN_KEY, LEFT_KEY, RIGHT_KEY, UP_KEY, _key_event
 
@@ -80,7 +81,7 @@ def test_left_after_a_row_click_still_goes_up(sample_tree, h):
     fm.step(_key_event(DOWN_KEY))
     fm.step(_key_event(RIGHT_KEY))  # into alpha
 
-    ui.find(role="data_table").row("notes.txt").click()  # focuses alpha's table
+    pointer(ui, "notes.txt")  # a real MouseDown/MouseUp, focuses alpha's table
     fm.step(_key_event(LEFT_KEY))
 
     assert fm.cursor.path == sample_tree, "Left did not go up"
