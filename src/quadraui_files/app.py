@@ -160,23 +160,18 @@ without any Python code needing to run between events.
 
 from __future__ import annotations
 
-import ctypes
 import math
 import mimetypes
 import os
-import plistlib
-import shutil
 import struct
 import subprocess
 import sys
 import threading
-import time
 import zlib
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from stat import filemode
-from typing import Callable, Iterable, Iterator, Protocol
+from typing import Callable, Iterable
 
 from quadraui import InternalError, QuadrauiError, QuiApp
 from quadraui.app.hot_reload import (
@@ -186,6 +181,73 @@ from quadraui.app.hot_reload import (
     reload_modules,
     resolve_modules,
     restore_modules,
+)
+
+# The framework-free leaves this module re-exports for backward compat --
+# `fs.py` (the lazily-scanned model + fs-watch), `search.py` (the search
+# worker), `places.py` (per-OS sidebar places), `tags.py` (macOS color
+# tags). None of those four modules imports `quadraui`; every name below is
+# imported here purely so `from quadraui_files.app import ...` and
+# `enable_hot_reload`'s module-`__dict__` snapshot keep working unchanged.
+from .fs import (
+    FS_WATCH_WAKE,
+    Node,
+    _FolderSnapshot,
+    _copy_entry_to,
+    _folder_signature,
+    _invalid_rename_name,
+    _is_under,
+    _reparent_paths,
+    _safe_mtime,
+    _safe_size,
+    _sort_key,
+    _unique_sibling_name,
+    build_root,
+    ensure_loaded,
+    load_children,
+)
+from .places import (
+    Place,
+    PlaceSection,
+    _existing,
+    _linux_sections,
+    _mac_sections,
+    _mac_volumes,
+    _windows_sections,
+    default_sections,
+)
+from .search import (
+    SEARCH_FIELD_ACTION,
+    SEARCH_RESULT_CAP,
+    SEARCH_SCOPE_ACTION_PREFIX,
+    SEARCH_SCOPE_FOLDER,
+    SEARCH_SCOPE_MAC,
+    SEARCH_WAKE,
+    SearchState,
+    _mdfind,
+    _result_node,
+    _search_of,
+    _search_worker,
+    _walk_matches,
+    _where_text,
+    default_spotlight,
+)
+from .tags import (
+    TAG_COLOR_NAMES,
+    TAG_COLORS,
+    TAG_READER,
+    TagColor,
+    TagReader,
+    _darwin_getxattr,
+    _mac_user_tags,
+    _tag_dot_span,
+    _MacTagReader,
+    _NullTagReader,
+    _TAG_COLOR_LABEL_INDEX,
+    _TAG_DOT_GLYPH,
+    _TAG_RGB,
+    _KMD_USER_TAGS_XATTR,
+    _XATTR_BIN,
 )
 
 try:
@@ -209,423 +271,6 @@ except ImportError:  # pragma: no cover - defensive, see doc above
 # TUI, GTK, AppKit and Win32 on a given machine -- so gating the undo
 # affordance on it keeps one descriptor set running on every backend.
 UNDO_SUPPORTED = sys.platform != "darwin"
-
-# The `User` payload `FileManager.enable_fs_watch`'s watcher thread posts
-# through the waker on a filesystem change -- the same shape `HOT_RELOAD_WAKE`
-# is for hot reload, just this app's own sentinel rather than one imported
-# from `quadraui.app.hot_reload`.
-FS_WATCH_WAKE = "quadraui_files.fs_watch"
-
-
-@dataclass
-class Node:
-    """One filesystem entry in the lazily-scanned model.
-
-    `children is None` means "not loaded yet" -- a directory whose contents
-    have never been read. After loading, `children` is a (possibly empty)
-    list. Files always keep `children is None` and are never loaded.
-    `expanded` is True only for directories the user has opened in the tree.
-    """
-
-    name: str
-    path: Path
-    is_dir: bool
-    size_bytes: int | None = None
-    mtime: float | None = None
-    parent: "Node | None" = field(default=None, repr=False)
-    children: list["Node"] | None = None
-    expanded: bool = False
-    load_error: bool = False
-    load_error_reason: str | None = None  # e.g. "Permission denied", set with load_error
-    # Set only on a search tab's own node (#56): its `children` are the
-    # results, not a directory listing. Read it with `_search_of`, which
-    # also covers a `Node` built before a hot reload added this field.
-    search: "SearchState | None" = field(default=None, repr=False)
-
-    def subdirs(self) -> list["Node"]:
-        """Loaded child directories in display order (empty if not loaded)."""
-        return [c for c in (self.children or ()) if c.is_dir]
-
-
-def _safe_size(path: Path) -> int | None:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return None
-
-
-def _safe_mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
-
-
-def _sort_key(node: Node) -> tuple[bool, str]:
-    """Directories first, then case-insensitive name."""
-    return (not node.is_dir, node.name.lower())
-
-
-def _invalid_rename_name(new_name: str) -> str | None:
-    """None if `new_name` is safe to rename onto; otherwise a human-readable
-    reason it's rejected. A path separator (`/`, or `os.sep`/`os.altsep` on
-    this platform) makes `Path.with_name` raise `ValueError` instead of the
-    `OSError` a failed rename raises, so it has to be caught here rather
-    than relying on that except clause. A name that is only dots (`.`/`..`)
-    raises the same way. A leading dot is rejected too: `load_children`
-    skips dotfiles, so a renamed entry would silently vanish from the
-    listing on the very next refresh."""
-    separators = {"/", os.sep, os.altsep} - {None}
-    if any(sep in new_name for sep in separators):
-        return "name can't contain a path separator"
-    if new_name.startswith("."):
-        return "hidden names aren't shown here"
-    return None
-
-
-def _unique_sibling_name(parent: Node, base: str, suffix: str = "") -> str:
-    """The first of `base+suffix`, `base 2+suffix`, `base 3+suffix`, ... that
-    isn't already a name in `parent.children` (case-insensitive, matching a
-    case-insensitive filesystem's own collision rule -- same check `_rename`
-    makes). Used for New Folder's "untitled folder"/"untitled folder 2"/...
-    and Duplicate/Paste's "name copy"/"name copy 2"/..., Finder's own
-    numbering for both."""
-    existing = {c.name.lower() for c in (parent.children or ())}
-    name = f"{base}{suffix}"
-    if name.lower() not in existing:
-        return name
-    n = 2
-    while True:
-        name = f"{base} {n}{suffix}"
-        if name.lower() not in existing:
-            return name
-        n += 1
-
-
-def _copy_entry_to(source: Node, new_path: Path, parent: Node) -> Node:
-    """Copy `source`'s file (or, recursively, its whole directory tree) onto
-    `new_path` and return the `Node` for it, parented under `parent` --
-    shared by `_duplicate` (same folder) and `_paste` (possibly a different
-    one). Raises `OSError` on failure; the caller reports it as a message,
-    same as `_rename`'s own disk-op failures."""
-    if source.is_dir:
-        shutil.copytree(source.path, new_path)
-    else:
-        shutil.copy2(source.path, new_path)
-    return Node(
-        name=new_path.name,
-        path=new_path,
-        is_dir=source.is_dir,
-        size_bytes=None if source.is_dir else _safe_size(new_path),
-        mtime=_safe_mtime(new_path),
-        parent=parent,
-    )
-
-
-def load_children(node: Node) -> None:
-    """Read `node`'s immediate children (one level only), dotfiles skipped and
-    directories sorted first. On an unreadable directory (`PermissionError`/
-    other `OSError` -- e.g. macOS blocking `~/Documents` for some terminals
-    under its privacy sandbox), leaves it empty and flags `load_error`, with
-    `load_error_reason` set to the OS's own message (`exc.strerror`) so a
-    caller can tell the user *why*, not just that it failed. Files are a
-    no-op."""
-    if not node.is_dir:
-        return
-    try:
-        entries = [c for c in node.path.iterdir() if not c.name.startswith(".")]
-    except OSError as exc:
-        node.children = []
-        node.load_error = True
-        node.load_error_reason = exc.strerror or str(exc)
-        return
-    kids = [
-        Node(
-            name=child.name,
-            path=child,
-            is_dir=child.is_dir(),
-            size_bytes=None if child.is_dir() else _safe_size(child),
-            mtime=_safe_mtime(child),
-            parent=node,
-        )
-        for child in entries
-    ]
-    kids.sort(key=_sort_key)
-    node.children = kids
-    node.load_error = False
-    node.load_error_reason = None
-
-
-def ensure_loaded(node: Node) -> None:
-    """Load `node`'s children once; cheap no-op if already loaded or a file."""
-    if node.is_dir and node.children is None:
-        load_children(node)
-
-
-def _folder_signature(path: Path) -> tuple[tuple[str, int, int], ...] | None:
-    """A cheap, dependency-free stamp of `path`'s own immediate listing, used
-    by `FileManager.enable_fs_watch` to notice an external change (Finder,
-    another terminal, `rm`/`mv`, ...) with no OS-level watcher (inotify/
-    FSEvents/ReadDirectoryChangesW) and no new runtime dependency -- just a
-    `stat()` per entry, on the one folder the active tab is showing. Skips
-    dotfile entries, matching `load_children`'s own filtering, so hidden-file
-    churn the app never displays (Finder rewriting `.DS_Store`, `.git`
-    changing during other work in the same folder) doesn't trigger a visible
-    refresh; a visible<->hidden rename still changes the visible set either
-    way. Each remaining entry's (name, mtime, size), sorted so creation order
-    doesn't matter -- changes on an add, a remove, a rename, or a rewrite of
-    an entry's own content/metadata. An entry that disappears mid-scan (a
-    race with another process's own delete/rename) is just skipped rather
-    than failing the whole signature. `None` means `path` itself can't be
-    read right now (just deleted, or a permission revoked); callers treat
-    that as "nothing new to report" for the purpose of noticing a change --
-    `_report_load_error` is what surfaces that failure, the next time
-    something actually reloads this folder."""
-    try:
-        listing = []
-        for entry in os.scandir(path):
-            if entry.name.startswith("."):
-                continue
-            try:
-                stat = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            listing.append((entry.name, stat.st_mtime_ns, stat.st_size))
-    except OSError:
-        return None
-    return tuple(sorted(listing))
-
-
-class _FolderSnapshot:
-    """The baseline `FileManager.enable_fs_watch` diffs the active folder
-    against -- the filesystem-watch analogue of `ModuleWatcher` (quadraui's
-    hot-reload baseline). Keeps one baseline *per path*, not just the most
-    recently watched one, so a tab switch or a drill-down to a folder this
-    session has never watched before doesn't itself read as "changed" --
-    `changed()` takes that folder's first baseline silently and reports
-    nothing new. A folder this session *has* watched before (switch away
-    and back) keeps comparing against its own last-known listing, so a real
-    external edit made while a different tab was active is still caught the
-    moment this one becomes active again -- the only thing a navigation-time
-    check needs to buy."""
-
-    def __init__(self) -> None:
-        self._signatures: dict[Path, tuple[tuple[str, int, int], ...] | None] = {}
-
-    def snapshot(self, path: Path) -> None:
-        """Record (or re-arm) `path`'s current listing as its baseline."""
-        self._signatures[path] = _folder_signature(path)
-
-    def changed(self, path: Path) -> bool:
-        """`True` when `path`'s listing differs from its last-recorded
-        baseline. A `path` with no baseline yet takes one now and reports no
-        change -- arriving somewhere isn't itself an edit. Otherwise
-        read-only: comparing against an existing baseline never updates it;
-        `snapshot()` is the explicit re-arm, done after a change is actually
-        acted on (see `FileManager.fs_watch_if_changed`)."""
-        if path not in self._signatures:
-            self.snapshot(path)
-            return False
-        return _folder_signature(path) != self._signatures[path]
-
-
-# --- search (#56) --------------------------------------------------------------
-#
-# Finder-style search: a search tab whose listing is the result set. A search
-# runs on a daemon thread (`_search_worker`), never in `render()` or the
-# handler, and hands its results over through `SearchState.pending`; the
-# thread posts `SEARCH_WAKE` through the waker and the wake, dispatched on the
-# run loop's own thread, moves them into the tab (`FileManager.
-# _drain_searches`). Two scopes, Finder's own: the folder the search started
-# from (walk its subfolders -- every OS, and what the test suite drives) and
-# "This Mac" (Spotlight's `mdfind`, macOS only). Both match names only,
-# case-insensitively, and skip dotfiles the same way `load_children` does.
-#
-# Results are *detached* `Node`s (`parent is None`): giving each one a real
-# parent chain would mean `_node_for` reading every ancestor directory on the
-# UI thread. Anything that needs the real model node -- navigating into a
-# folder result, rename, trash, Get Info -- resolves it by path
-# (`FileManager._resolve_result`).
-
-SEARCH_WAKE = "quadraui_files.search"
-SEARCH_SCOPE_FOLDER = "folder"
-SEARCH_SCOPE_MAC = "mac"
-SEARCH_SCOPE_ACTION_PREFIX = "fm:search:scope:"
-SEARCH_FIELD_ACTION = "fm:search:field"  # the address bar's search field, see `_search_field_segment`
-SEARCH_RESULT_CAP = 1000  # past this many hits the search stops, like a capped Finder window
-_SEARCH_POST_INTERVAL = 0.15  # seconds between wakes while results stream in
-
-
-class SearchState:
-    """One running (or finished) search. The worker thread only ever touches
-    `pending`/`done`/`capped`/`error` (under `lock`) and reads `cancel`; the
-    run-loop thread drains `pending` into the tab's `node.children` and sets
-    `finished` once it has drained a `done` search, which tells the worker to
-    stop re-posting its final wake."""
-
-    def __init__(self, query: str, scope: str, root: Node, node: Node) -> None:
-        self.query = query
-        self.scope = scope
-        self.root = root  # the folder the search was started from
-        self.node = node  # the search tab's own node
-        self.lock = threading.Lock()
-        self.pending: list[Node] = []
-        self.done = False
-        self.capped = False
-        self.error: str | None = None
-        self.finished = False
-        self.cancel = threading.Event()
-
-
-def _search_of(node: Node | None) -> SearchState | None:
-    """`node`'s search, if it is a search tab's node."""
-    return getattr(node, "search", None)
-
-
-def _result_node(path: Path) -> Node | None:
-    """A detached result row for `path` (see this section's doc), or `None`
-    if it vanished between being found and being stat'ed."""
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    is_dir = os.path.isdir(path)
-    return Node(
-        name=path.name,
-        path=path,
-        is_dir=is_dir,
-        size_bytes=None if is_dir else st.st_size,
-        mtime=st.st_mtime,
-    )
-
-
-def _walk_matches(root: Path, query: str) -> Iterator[Path]:
-    """Every non-dot entry below `root` whose name contains `query`
-    (case-insensitive), breadth of each folder before its subfolders. Dot
-    folders aren't descended into, symlinked folders aren't followed, and an
-    unreadable folder is skipped rather than ending the search."""
-    q = query.lower()
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-        base = Path(dirpath)
-        for name in [*dirnames, *sorted(f for f in filenames if not f.startswith("."))]:
-            if q in name.lower():
-                yield base / name
-
-
-def _mdfind(query: str) -> Iterator[str]:
-    """Spotlight's name search (`mdfind -name`), one path per line as it
-    streams. Closing the generator early kills `mdfind`."""
-    proc = subprocess.Popen(
-        ["mdfind", "-name", query],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            yield line.rstrip("\n")
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-def default_spotlight() -> Callable[[str], Iterable[str]] | None:
-    """The "This Mac" search runner on this host: `mdfind` on macOS, `None`
-    (no This Mac scope offered) anywhere else."""
-    if sys.platform == "darwin" and shutil.which("mdfind"):
-        return _mdfind
-    return None
-
-
-def _search_worker(state: SearchState, waker, spotlight: Callable[[str], Iterable[str]] | None) -> None:
-    """The search thread: find matches, hand them over in batches, and keep
-    posting `SEARCH_WAKE` until the run loop has drained the final batch --
-    the same re-post-until-acknowledged safety net `_fs_watch_loop`'s doc
-    gives, for a backend that drops or coalesces a wake."""
-    if state.scope == SEARCH_SCOPE_MAC and spotlight is not None:
-        source = (Path(p) for p in spotlight(state.query) if p)
-    else:
-        source = _walk_matches(state.root.path, state.query)
-    count = 0
-    last_post = 0.0
-    try:
-        for path in source:
-            if state.cancel.is_set():
-                return
-            if any(part.startswith(".") for part in path.parts):
-                continue  # Spotlight returns dotfiles; the app never lists them
-            node = _result_node(path)
-            if node is None:
-                continue
-            with state.lock:
-                state.pending.append(node)
-            count += 1
-            if count >= SEARCH_RESULT_CAP:
-                with state.lock:
-                    state.capped = True
-                break
-            now = time.monotonic()
-            if now - last_post >= _SEARCH_POST_INTERVAL:
-                last_post = now
-                waker.post(SEARCH_WAKE)
-    except Exception as exc:  # a failed search reports itself, it doesn't kill the app
-        with state.lock:
-            state.error = str(exc) or type(exc).__name__
-    finally:
-        close = getattr(source, "close", None)
-        if close is not None:
-            close()  # stops `mdfind` early on a cap or a cancel
-        with state.lock:
-            state.done = True
-    for _ in range(40):  # ~10s of re-posts at most
-        if state.finished or state.cancel.is_set():
-            return
-        waker.post(SEARCH_WAKE)
-        state.cancel.wait(0.25)
-
-
-def _where_text(path: Path, root: Path | None = None, root_label: str = "") -> str:
-    """The search results' Where column: the folder `path` is in. Under the
-    folder the search started from (`root`), relative to it (that folder
-    itself shows as `root_label`), so a long shared prefix doesn't push the
-    part that tells results apart off the end of the column; otherwise with
-    the home folder shortened to `~` the way `_window_title` does it."""
-    parent = path.parent
-    if root is not None and _is_under(parent, root):
-        rel = parent.relative_to(root)
-        return root_label if rel == Path(".") else rel.as_posix()
-    home = Path.home()
-    if parent == home:
-        return "~"
-    try:
-        return f"~/{parent.relative_to(home)}"
-    except ValueError:
-        return str(parent)
-
-
-def _is_under(path: Path, ancestor: Path) -> bool:
-    return path == ancestor or ancestor in path.parents
-
-
-def _reparent_paths(node: Node) -> None:
-    """After `node.path` changes (a rename), fix every already-loaded
-    descendant's cached `path` to sit under it. Children were computed by
-    `iterdir()` under the old path and would otherwise keep pointing at a
-    location that no longer exists once the rename lands on disk."""
-    for child in node.children or ():
-        child.path = node.path / child.name
-        _reparent_paths(child)
-
-
-def build_root(root_path: Path) -> Node:
-    """A filesystem root (`/`, `C:\\`), loaded one level deep. Every other
-    node hangs off one of these -- see `FileManager._node_for`."""
-    root = Node(name=root_path.name or str(root_path), path=root_path, is_dir=root_path.is_dir())
-    ensure_loaded(root)
-    root.expanded = True
-    return root
 
 
 # --- places -> sidebar tree descriptor ---------------------------------------
@@ -744,370 +389,6 @@ def _styled_text(text: str) -> dict:
     return {"spans": [{"text": text, "fg": None, "bg": None}]}
 
 
-# --- color tags (macOS only, #54) --------------------------------------------
-#
-# Finder's own per-file color tags -- the 7 built-in colors it's shipped
-# since Mavericks, painted as a colored dot next to a file's name and offered
-# as a picker from Get Info / the context menu. Windows/Nautilus have no
-# equivalent metadata to anchor a cross-platform design on (VISION.md's
-# Finder-parity backlog explicitly ranks this item last for exactly that
-# reason), so this is deliberately macOS-only, both in storage (real xattr/
-# Spotlight metadata, not app-private state -- a tag set here shows up in a
-# real Finder window on the same file, and vice versa) and in the picker UI,
-# which simply isn't offered anywhere else (`FileManager._tags_supported`).
-#
-# The colored dot itself needed no new descriptor seam: `details_table`'s
-# Name cell is already a `StyledText` with an arbitrary per-span `fg`
-# (`_styled_text`, just above), so the dot is just one more colored glyph
-# span ahead of the name -- the gap flagged as a maybe in this issue never
-# actually came up.
-
-
-@dataclass(frozen=True)
-class TagColor:
-    """One of Finder's 7 built-in label colors."""
-
-    name: str
-    rgb: tuple[int, int, int]
-
-
-TAG_COLORS: tuple[TagColor, ...] = (
-    TagColor("Red", (255, 69, 58)),
-    TagColor("Orange", (255, 159, 10)),
-    TagColor("Yellow", (255, 214, 10)),
-    TagColor("Green", (48, 209, 88)),
-    TagColor("Blue", (10, 132, 255)),
-    TagColor("Purple", (191, 90, 242)),
-    TagColor("Gray", (142, 142, 147)),
-)
-TAG_COLOR_NAMES: tuple[str, ...] = tuple(c.name for c in TAG_COLORS)
-_TAG_RGB: dict[str, tuple[int, int, int]] = {c.name: c.rgb for c in TAG_COLORS}
-# Finder's own legacy label index (1-7, written as the trailing digit of the
-# `"<name>\n<index>"` tag string `_MacTagReader` reads/writes) -- this is
-# `kMDItemFSLabel`'s own numbering, NOT the swatch order `TAG_COLORS` lists
-# above (that order is only this app's own picker's/Finder's Tags-picker
-# *display* row). Needs reconfirming on a real Mac before shipping (tag a
-# file with each of the 7 colors in Finder, `xattr -px
-# com.apple.metadata:_kMDItemUserTags` on it, and compare the trailing
-# digit against this table) -- no macOS box is available in this
-# environment to do that firsthand.
-_TAG_COLOR_LABEL_INDEX: dict[str, int] = {
-    "Gray": 1,
-    "Green": 2,
-    "Purple": 3,
-    "Blue": 4,
-    "Yellow": 5,
-    "Red": 6,
-    "Orange": 7,
-}
-_TAG_DOT_GLYPH = "●"
-
-
-def _tag_dot_span(color: str | None) -> dict | None:
-    """The Name cell's leading `StyledSpan` for `color` (one of
-    `TAG_COLOR_NAMES`), or `None` when there's no tag to show at all --
-    `DataRow` has no `Icon`-bearing field (`_codicon_glyph`'s own doc covers
-    the same gap for the file-type marker), so the dot is just a colored
-    glyph baked into the cell's own `StyledText.spans`."""
-    if color is None:
-        return None
-    r, g, b = _TAG_RGB[color]
-    return {"text": f"{_TAG_DOT_GLYPH} ", "fg": {"r": r, "g": g, "b": b, "a": 255}, "bg": None}
-
-
-class TagReader(Protocol):
-    """Reads/writes one path's Finder tag color: `None` means no tag, else
-    one of `TAG_COLOR_NAMES`. `_MacTagReader` is the real, macOS-only
-    implementation; `_NullTagReader` is the permanent no-op everywhere else.
-    A test injects its own stub instead of either (`FileManager(...,
-    tag_reader=...)`) -- the "black-box for the rendering/picker UI with a
-    stubbed tag reader" story this issue's own Verification section asks
-    for, since there is no real xattr to read on the box the suite runs on."""
-
-    def get(self, path: Path) -> str | None: ...
-
-    def set(self, path: Path, color: str | None) -> None: ...
-
-
-class _NullTagReader:
-    """The non-macOS `TagReader`: Windows and Linux have no `kMDItemUserTags`
-    equivalent to read or write (this issue's own "no Explorer/Nautilus
-    equivalent" is why color tags stay macOS-only), so every call here is a
-    no-op. `FileManager._tags_supported` is `False` exactly when this is the
-    active reader, which is what actually hides the picker UI -- this
-    class's own no-op-ness alone would just mean every tag silently reads
-    back `None`, not that the picker disappears."""
-
-    def get(self, path: Path) -> str | None:
-        return None
-
-    def set(self, path: Path, color: str | None) -> None:
-        pass
-
-
-_KMD_USER_TAGS_XATTR = "com.apple.metadata:_kMDItemUserTags"
-_XATTR_BIN = "/usr/bin/xattr"  # absolute, so a Homebrew/pip `xattr` on $PATH can't shadow the system one
-
-
-def _darwin_getxattr(path: Path, name: str) -> bytes | None:
-    """Reads extended attribute `name` off `path` in-process, via libSystem's
-    own `getxattr(2)` through `ctypes` -- `_tag_color_for` calls this once
-    per row on every render (`render()` rebuilds the tree every frame), so
-    an `/usr/bin/xattr` subprocess spawn per row would visibly stall a
-    large folder's first paint. CPython's own `os.getxattr`/`os.setxattr`
-    aren't built on Darwin (`posixmodule.c`'s `HAVE_XATTR` guard, which its
-    own `configure` never defines there), so `ctypes` against the libc
-    already loaded into this process is the in-process route, not a
-    subprocess at all -- no `timeout=` to pick here, there's no process to
-    hang. Returns `None` for "no such attribute" and for any other OS-level
-    failure alike (a missing/unreadable file, say) -- both mean "nothing to
-    show", same as the old subprocess path's blanket `except`."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.getxattr.restype = ctypes.c_ssize_t
-    libc.getxattr.argtypes = [
-        ctypes.c_char_p,
-        ctypes.c_char_p,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_uint32,
-        ctypes.c_int,
-    ]
-    raw_path = os.fsencode(str(path))
-    raw_name = name.encode("utf-8")
-    size = libc.getxattr(raw_path, raw_name, None, 0, 0, 0)
-    if size < 0:
-        return None
-    buf = ctypes.create_string_buffer(size)
-    size = libc.getxattr(raw_path, raw_name, buf, size, 0, 0)
-    if size < 0:
-        return None
-    return buf.raw[:size]
-
-
-def _mac_user_tags(path: Path) -> list[str]:
-    """Every raw `"<name>\\n<label-index>"` (or plain free-text) entry of
-    `path`'s own `_kMDItemUserTags`, or `[]` when it has none / isn't
-    readable. Shared by `_MacTagReader.get` (which only cares about the one
-    entry naming a color) and `.set` (which has to keep every *other*
-    entry untouched -- see its own doc)."""
-    raw = _darwin_getxattr(path, _KMD_USER_TAGS_XATTR)
-    if raw is None:
-        return []
-    try:
-        tags = plistlib.loads(raw)
-    except (ValueError, plistlib.InvalidFileException, TypeError):
-        return []
-    if not isinstance(tags, list):
-        # A plist that decodes to something other than an array -- not
-        # what Finder itself ever writes, but a third-party tool's xattr
-        # is input this app doesn't control; degrade to "no tags" rather
-        # than let a non-iterable take the render frame down.
-        return []
-    return [tag for tag in tags if isinstance(tag, str)]
-
-
-class _MacTagReader:
-    """The real macOS `TagReader`: Finder's own `_kMDItemUserTags` xattr, a
-    binary-plist array of `"<name>\\n<label-index>"` strings -- the exact
-    shape Finder itself reads/writes, so a tag set here shows up in a real
-    Finder window on the same file, and vice versa. Reads happen in-process
-    (`_darwin_getxattr`, no subprocess spawn -- see its own doc); writes
-    still shell out to `/usr/bin/xattr`, since there is no in-process
-    `setxattr` to reach for either (same `HAVE_XATTR` gap), and a write is
-    one per user action rather than one per rendered row. Keeps (and
-    writes) only the one tag that names one of Finder's 7 built-in colors
-    -- a file can carry other, free-text tags too, which aren't a color
-    this app's picker offers, and both `get()` and `set()` leave those
-    alone: `set()` reads the existing array first and only replaces the
-    color entry, rather than overwriting the whole attribute."""
-
-    def get(self, path: Path) -> str | None:
-        for tag in _mac_user_tags(path):
-            name = tag.split("\n", 1)[0]
-            if name in _TAG_RGB:
-                return name
-        return None
-
-    def set(self, path: Path, color: str | None) -> None:
-        """Applies `color` (or clears it for `None`) without touching any
-        other tag `path` already carries. Raises `OSError` if the
-        underlying `xattr` write fails (read-only volume, EPERM, missing
-        `xattr` binary, ...) -- `FileManager._set_tag_color` reports that
-        to the user instead of claiming success for a tag that isn't
-        actually on disk."""
-        kept = [tag for tag in _mac_user_tags(path) if tag.split("\n", 1)[0] not in _TAG_RGB]
-        if color is not None:
-            kept.append(f"{color}\n{_TAG_COLOR_LABEL_INDEX[color]}")
-        path_str = str(path)
-        if not kept:
-            result = subprocess.run(
-                [_XATTR_BIN, "-d", _KMD_USER_TAGS_XATTR, path_str],
-                capture_output=True,
-                timeout=1,
-            )
-            # `xattr -d` on an attribute that was never set is already a
-            # no-op from this method's own point of view (nothing left to
-            # clear), so that one non-zero exit doesn't count as a failure.
-            if result.returncode != 0 and b"No such xattr" not in result.stderr:
-                raise OSError(result.stderr.decode(errors="replace").strip() or "xattr -d failed")
-            return
-        payload = plistlib.dumps(kept, fmt=plistlib.FMT_BINARY)
-        result = subprocess.run(
-            [_XATTR_BIN, "-w", "-x", _KMD_USER_TAGS_XATTR, payload.hex(), path_str],
-            capture_output=True,
-            timeout=1,
-        )
-        if result.returncode != 0:
-            raise OSError(result.stderr.decode(errors="replace").strip() or "xattr -w failed")
-
-
-# The default reader every real run picks (a test overrides it via
-# `FileManager`'s own `tag_reader=` constructor arg, never this global) --
-# `sys.platform` is right here, unlike the `_NATIVE_BACKEND` check at this
-# module's own top: this is a host-OS capability (which xattr exists to
-# read), not a built Cargo feature a cross-compiled binary could disagree
-# with its host about.
-TAG_READER: TagReader = _MacTagReader() if sys.platform == "darwin" else _NullTagReader()
-
-
-@dataclass(frozen=True)
-class Place:
-    """One sidebar entry: a folder the platform's own file manager pins
-    there (Desktop, Downloads, a mounted volume, ...). `codicon` must be in
-    quadraui's curated subset (`codicon_names::NAMES` -- ~50 names, no
-    home/cloud/drive/download glyphs yet -- JDonaghy/quadraui#2449), so
-    some icons are stand-ins. An unknown name only raises on the second
-    rendered frame (JDonaghy/quadraui#2450)."""
-
-    label: str
-    path: Path
-    codicon: str
-    # Painted instead of the codicon when nerd fonts are off (the TUI's
-    # default): a single-width symbol any terminal font has, so places stay
-    # distinguishable at a glance without one.
-    fallback: str = "▪"
-
-
-@dataclass(frozen=True)
-class PlaceSection:
-    """A titled, collapsible group of `Place`s."""
-
-    title: str
-    places: tuple[Place, ...]
-
-
-def _existing(places: list[Place]) -> tuple[Place, ...]:
-    """`places` minus any whose folder doesn't exist on this machine (no
-    iCloud, no `~/Music`, an unmounted drive...)."""
-    return tuple(p for p in places if p.path.is_dir())
-
-
-def _mac_volumes() -> list[Place]:
-    """Finder's Locations: every volume under `/Volumes`. The boot volume
-    shows up there as a symlink back to `/` -- it keeps its own name
-    ("Macintosh HD") but browses `/` itself, as Finder's does."""
-    volumes: list[Place] = []
-    try:
-        entries = sorted(Path("/Volumes").iterdir(), key=lambda p: p.name.lower())
-    except OSError:
-        entries = []
-    boot: list[Place] = []
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
-        try:
-            is_boot = entry.resolve() == Path("/")
-        except OSError:
-            continue
-        if is_boot:
-            boot.append(Place(entry.name, Path("/"), "root-folder", "▣"))
-        else:
-            volumes.append(Place(entry.name, entry, "database", "▤"))
-    if not boot:
-        boot.append(Place("Macintosh HD", Path("/"), "root-folder", "▣"))
-    return boot + volumes
-
-
-def _mac_sections(home: Path) -> list[PlaceSection]:
-    """Finder's default sidebar (AirDrop/Recents/Tags left out: they are
-    searches and services, not folders)."""
-    sections = [
-        PlaceSection(
-            "Favorites",
-            _existing([
-                Place("Applications", Path("/Applications"), "package", "◆"),
-                Place("Desktop", home / "Desktop", "layout", "▭"),
-                Place("Documents", home / "Documents", "files", "≡"),
-                Place("Downloads", home / "Downloads", "folder", "↓"),
-                Place(home.name, home, "account", "⌂"),
-            ]),
-        ),
-        PlaceSection(
-            "iCloud",
-            _existing([
-                Place("iCloud Drive", home / "Library" / "Mobile Documents" / "com~apple~CloudDocs", "sync", "○"),
-            ]),
-        ),
-        PlaceSection("Locations", _existing(_mac_volumes())),
-    ]
-    return [s for s in sections if s.places]
-
-
-def _windows_sections(home: Path) -> list[PlaceSection]:
-    """Explorer's navigation pane: Quick access's default pins, then This
-    PC's drives."""
-    drives: list[Place] = []
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        root = Path(f"{letter}:\\")
-        if root.exists():
-            drives.append(Place(f"Local Disk ({letter}:)" if letter == "C" else f"{letter}:", root, "database", "▤"))
-    sections = [
-        PlaceSection(
-            "Quick access",
-            _existing([
-                Place("Home", home, "account", "⌂"),
-                Place("Desktop", home / "Desktop", "layout", "▭"),
-                Place("Downloads", home / "Downloads", "folder", "↓"),
-                Place("Documents", home / "Documents", "files", "≡"),
-                Place("Pictures", home / "Pictures", "file-media", "▨"),
-                Place("Music", home / "Music", "file-media", "♪"),
-                Place("Videos", home / "Videos", "file-media", "►"),
-            ]),
-        ),
-        PlaceSection("This PC", tuple(drives)),
-    ]
-    return [s for s in sections if s.places]
-
-
-def _linux_sections(home: Path) -> list[PlaceSection]:
-    """Nautilus's sidebar: the XDG user folders, then the computer itself
-    and whatever removable media is mounted for this user."""
-    user = home.name
-    mounts: list[Place] = [Place("Computer", Path("/"), "root-folder", "▣")]
-    for base in (Path("/media") / user, Path("/run/media") / user):
-        try:
-            entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
-        except OSError:
-            continue
-        mounts.extend(Place(e.name, e, "database", "▤") for e in entries if e.is_dir())
-    sections = [
-        PlaceSection(
-            "Places",
-            _existing([
-                Place("Home", home, "account", "⌂"),
-                Place("Desktop", home / "Desktop", "layout", "▭"),
-                Place("Documents", home / "Documents", "files", "≡"),
-                Place("Downloads", home / "Downloads", "folder", "↓"),
-                Place("Music", home / "Music", "file-media", "♪"),
-                Place("Pictures", home / "Pictures", "file-media", "▨"),
-                Place("Videos", home / "Videos", "file-media", "►"),
-            ]),
-        ),
-        PlaceSection("Devices", _existing(mounts)),
-    ]
-    return [s for s in sections if s.places]
-
-
 # Terminals that ship the Nerd Font symbols built in, so codicon glyphs paint
 # whatever font the user picked. Matched as substrings of `$TERM_PROGRAM`/
 # `$TERM`, or of tmux's `client_termname`/`client_termtype` when running
@@ -1141,19 +422,6 @@ def detect_nerd_fonts(env: dict[str, str] | None = None) -> bool:
             pass
     blob = " ".join(names).lower()
     return any(name in blob for name in _NERD_FONT_TERMINALS)
-
-
-def default_sections(platform: str | None = None, home: Path | None = None) -> list[PlaceSection]:
-    """The sidebar the host OS's own file manager would show -- Finder's on
-    macOS, Explorer's on Windows, Nautilus's elsewhere. Decided by the host
-    OS, not the backend: the TUI on a Mac shows Finder's places too."""
-    platform = platform or sys.platform
-    home = home or Path.home()
-    if platform == "darwin":
-        return _mac_sections(home)
-    if platform == "win32":
-        return _windows_sections(home)
-    return _linux_sections(home)
 
 
 def sidebar_rows(

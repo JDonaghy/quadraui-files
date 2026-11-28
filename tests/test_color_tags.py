@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import quadraui_files.app as app
+import quadraui_files.tags as tags
 from conftest import click as _click
 from conftest import find_row as _find_row
 
@@ -257,7 +258,7 @@ def test_mac_tag_reader_set_preserves_other_finder_tags(monkeypatch, tmp_path):
     """Setting a color must not drop a free-text tag (`"Invoices"`) the
     file already carries in Finder -- `set()` reads the existing array and
     only replaces the one color entry, per its own doc."""
-    monkeypatch.setattr(app, "_mac_user_tags", lambda path: ["Work", "Invoices", "Blue\n4"])
+    monkeypatch.setattr(tags, "_mac_user_tags", lambda path: ["Work", "Invoices", "Blue\n4"])
     calls: list = []
     monkeypatch.setattr(app.subprocess, "run", _fake_run(calls))
 
@@ -273,7 +274,7 @@ def test_mac_tag_reader_set_preserves_other_finder_tags(monkeypatch, tmp_path):
 def test_mac_tag_reader_set_none_clears_only_the_color_entry(monkeypatch, tmp_path):
     """Clearing the tag ("No Tag") must leave any other Finder tag alone --
     only the one entry naming a color comes out."""
-    monkeypatch.setattr(app, "_mac_user_tags", lambda path: ["Work", "Green\n2"])
+    monkeypatch.setattr(tags, "_mac_user_tags", lambda path: ["Work", "Green\n2"])
     calls: list = []
     monkeypatch.setattr(app.subprocess, "run", _fake_run(calls))
 
@@ -287,7 +288,7 @@ def test_mac_tag_reader_set_none_clears_only_the_color_entry(monkeypatch, tmp_pa
 def test_mac_tag_reader_set_deletes_the_xattr_once_no_tags_remain(monkeypatch, tmp_path):
     """Clearing the only tag a file has removes the whole attribute,
     rather than writing an empty-but-present array back."""
-    monkeypatch.setattr(app, "_mac_user_tags", lambda path: ["Red\n6"])
+    monkeypatch.setattr(tags, "_mac_user_tags", lambda path: ["Red\n6"])
     calls: list = []
     monkeypatch.setattr(app.subprocess, "run", _fake_run(calls))
 
@@ -301,7 +302,7 @@ def test_mac_tag_reader_set_raises_on_a_failed_write(monkeypatch, tmp_path):
     """A failed `xattr -w` (read-only volume, EPERM, ...) raises `OSError`
     rather than being silently swallowed -- `FileManager._set_tag_color`
     reports it instead of claiming the tag stuck."""
-    monkeypatch.setattr(app, "_mac_user_tags", lambda path: [])
+    monkeypatch.setattr(tags, "_mac_user_tags", lambda path: [])
     monkeypatch.setattr(
         app.subprocess, "run", _fake_run([], returncode=1, stderr=b"Operation not permitted")
     )
@@ -314,7 +315,7 @@ def test_mac_tag_reader_set_tolerates_deleting_a_tag_that_was_never_set(monkeypa
     """Clearing a tag on a file with no color tag at all (and no other
     Finder tags) is a no-op, not a reported failure, even though
     `xattr -d` itself exits non-zero for "no such attribute"."""
-    monkeypatch.setattr(app, "_mac_user_tags", lambda path: [])
+    monkeypatch.setattr(tags, "_mac_user_tags", lambda path: [])
     monkeypatch.setattr(
         app.subprocess,
         "run",
@@ -327,6 +328,6 @@ def test_mac_tag_reader_set_tolerates_deleting_a_tag_that_was_never_set(monkeypa
 def test_mac_tag_reader_get_ignores_non_color_tags(monkeypatch, tmp_path):
     """`get()` only reports the one entry naming a Finder color -- other
     free-text tags on the same file don't confuse it."""
-    monkeypatch.setattr(app, "_mac_user_tags", lambda path: ["Work", "Purple\n3", "Invoices"])
+    monkeypatch.setattr(tags, "_mac_user_tags", lambda path: ["Work", "Purple\n3", "Invoices"])
 
     assert app._MacTagReader().get(tmp_path / "f.txt") == "Purple"
